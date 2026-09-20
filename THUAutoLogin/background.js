@@ -19,7 +19,7 @@ const NATIVE_TIMEOUT_MS = 4000;
 // already autofilled into the DOM. `enter` additionally triggers the page's own
 // keyLogin() handler, so once it is used we no longer call doLogin() ourselves.
 const UNLOCK_LADDER = [
-  { strategy: 'shift', pollMs: 1000 },
+  // { strategy: 'shift', pollMs: 1000 },
   { strategy: 'tab', pollMs: 1000 },
   { strategy: 'f15', pollMs: 1000 },
   { strategy: 'enter', pollMs: 4000, submitsPage: true },
