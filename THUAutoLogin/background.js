@@ -18,8 +18,11 @@ const NATIVE_TIMEOUT_MS = 4000;
 // only proves "a real user typed something" so Chrome reveals the value it has
 // already autofilled into the DOM. `enter` additionally triggers the page's own
 // keyLogin() handler, so once it is used we no longer call doLogin() ourselves.
+//
+// `shift` is deliberately absent: measured on this machine, a bare modifier
+// keydown does not make Chrome expose the autofilled value. `tab` and `f15`
+// move focus / are inert but still count as real typing.
 const UNLOCK_LADDER = [
-  // { strategy: 'shift', pollMs: 1000 },
   { strategy: 'tab', pollMs: 1000 },
   { strategy: 'f15', pollMs: 1000 },
   { strategy: 'enter', pollMs: 4000, submitsPage: true },

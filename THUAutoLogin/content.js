@@ -11,6 +11,10 @@
   const isFocused = () =>
     document.hasFocus() && document.visibilityState === 'visible';
 
+  // getClientRects() is empty for display:none and for zero-size elements, and
+  // unlike offsetParent it still works for position:fixed nodes.
+  const isVisible = (el) => el.getClientRects().length > 0;
+
   const askBackgroundToLogin = () => {
     if (busy) return Promise.resolve({ ok: false, reason: 'busy' });
     busy = true;
@@ -38,26 +42,39 @@
       act: askBackgroundToLogin,
       requireFocus: true,
     },
+    {
+      // Information portal. When the user is not logged in the header renders
+      // the 登录 control as <span class="dehmil">. Its mere presence means
+      // "logged out", so no separate login-state probe is needed. There are two
+      // such spans (desktop + mobile layouts); click whichever is visible.
+      match: (p, host) => host === 'info.tsinghua.edu.cn',
+      find: () => {
+        const candidates = Array.from(document.querySelectorAll('.dehmil'));
+        return candidates.find(isVisible) || null;
+      },
+    },
   ];
 
   let attempts = 0;
   let lastAttemptAt = 0;
-  let lastPath = null;
+  let lastPageKey = null;
   let done = false;
 
   const currentPath = () => location.pathname.replace(/\/+$/, '') || '/';
 
   function tick() {
+    const host = location.hostname;
     const path = currentPath();
-    if (path !== lastPath) {
-      lastPath = path;
+    const pageKey = `${host}${path}`;
+    if (pageKey !== lastPageKey) {
+      lastPageKey = pageKey;
       attempts = 0;
       lastAttemptAt = 0;
       done = false;
     }
     if (done) return;
 
-    const rule = RULES.find((r) => r.match(path));
+    const rule = RULES.find((r) => r.match(path, host));
     if (!rule) return;
 
     // Only drive the native key agent while this document really has the

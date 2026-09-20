@@ -1,6 +1,15 @@
 # THU Auto Login
 
-自动登录清华大学信息门户 / 网络学堂的 Chrome 扩展，**不依赖 `chrome.debugger`，因此不会出现"正在调试此浏览器"横幅**。
+在清华几个站点上自动点击登录相关的按钮/链接的 Chrome 扩展：
+
+| 站点 | 触发条件 | 动作 |
+|---|---|---|
+| `learn.tsinghua.edu.cn/f/login` | 始终 | 点击 `#loginButtonId` |
+| `learn.tsinghua.edu.cn/f/wlxt/index/course/student` | 始终 | 点击 `.chongxin`（"重新登录"） |
+| `id.tsinghua.edu.cn/do/off/ui/auth/login/form/*` | 页面有焦点 | 通过原生组件注入真实按键，解锁 Chrome 自动填充，再调用 `doLogin()` |
+| `info.tsinghua.edu.cn/*` | 存在**可见**的 `span.dehmil`（即未登录） | 点击该登录按钮 |
+
+其中 `id.tsinghua.edu.cn` 的自动填充解锁**不依赖 `chrome.debugger`，因此不会出现"正在调试此浏览器"横幅**。
 
 ---
 
@@ -153,7 +162,6 @@ open -a THUAutoLoginKeyAgent --args --selftest
 
 ```js
 const UNLOCK_LADDER = [
-  { strategy: 'shift', pollMs: 1000 },
   { strategy: 'tab',   pollMs: 1000 },
   { strategy: 'f15',   pollMs: 1000 },
   { strategy: 'enter', pollMs: 4000, submitsPage: true },
@@ -162,8 +170,10 @@ const UNLOCK_LADDER = [
 
 逐级尝试，每级之后轮询最多 `pollMs` 确认自动填充值是否已经可见。
 
-- `shift` / `f15` / `f16` / `tab` / `escape` 都是**无副作用**的：不输入字符、不触发表单默认行为，纯粹用于让 Chrome 认定"发生了真实用户交互"。
+- `f15` / `f16` / `tab` / `escape` 都是**无副作用**的：不输入字符、不触发表单默认行为，纯粹用于让 Chrome 认定"发生了真实用户交互"。
 - `enter` 是最后手段：它会**同时触发页面自己的 `keyLogin()`**，所以走到这一步之后就不再调用 `doLogin()`，避免重复提交。
+
+> **已实测排除 `shift`**：在这台机器上，单独按一下修饰键（Shift）**不足以**让 Chrome 暴露自动填充值——它只产生 `keydown`/`keyup`，不改变输入框内容，Chrome 不认为发生了"编辑"。因此 `shift` 已从阶梯中删除。`tab` 虽然也只移动焦点，但实测可以生效。
 
 如果默认顺序在你的环境里不生效，把有效的那个挪到最前面即可减少延迟。
 
@@ -241,4 +251,27 @@ CODESIGN_IDENTITY="THUAutoLogin Dev" ./build.sh
 - 主机 ② 的 socket 权限为 `0600`，只有当前用户能连接，且只接受 `ping` / `unlock` 两种消息。
 - 主机 ② 的 `unlock` **只接受白名单按键策略**（`shift` / `f15` / `f16` / `tab` / `escape` / `enter`），不能发送任意按键或任意文本，因此无法被用来注入密码或命令。
 - 它不读取、不记录、不传输任何凭据；凭据始终只存在于 Chrome 的自动填充与页面 DOM 中。
-- 扩展只在 `id.tsinghua.edu.cn` / `learn.tsinghua.edu.cn` 上运行，且仅在登录表单页触发原生调用。
+- 扩展只在 `id.tsinghua.edu.cn` / `learn.tsinghua.edu.cn` / `info.tsinghua.edu.cn` 上运行。
+- **只有 `id.tsinghua.edu.cn` 的登录表单页会触发原生调用**；`info.tsinghua.edu.cn` 的点击完全在扩展内部完成，不接触原生组件。
+
+---
+
+## 11. `info.tsinghua.edu.cn` 登录按钮规则
+
+```js
+{
+  match: (p, host) => host === 'info.tsinghua.edu.cn',
+  find: () => {
+    const candidates = Array.from(document.querySelectorAll('.dehmil'));
+    return candidates.find(isVisible) || null;
+  },
+}
+```
+
+两个设计点：
+
+1. **"未登录"直接由元素本身判定，不需要额外探测登录态。** 未登录时页头渲染出 `<span class="dehmil">` 作为登录入口；已登录时该元素不存在或不可见。所以"能找到可见的 `.dehmil`"就等价于"未登录"。
+
+2. **只点可见的那一个。** 页面里有 **两个** `.dehmil`（桌面版 + 移动版布局），其中一个通常被 CSS 隐藏。直接 `querySelector('.dehmil')` 可能拿到隐藏的那个，点击无效。这里用 `getClientRects().length > 0` 过滤（比 `offsetParent !== null` 更稳，对 `position: fixed` 也成立），再点击第一个可见项。
+
+规则表是按顺序匹配的，且 `match` 同时收到 `path` 和 `host`，所以这条按 host 匹配的规则不会误伤 `learn` 上的其它路径。同其它点击类规则一样，它受 `MAX_ATTEMPTS`（3 次）与 `RETRY_AFTER_MS`（3 秒）节流，不会反复点击。

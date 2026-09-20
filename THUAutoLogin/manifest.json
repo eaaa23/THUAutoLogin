@@ -12,7 +12,8 @@
     {
       "matches": [
         "*://learn.tsinghua.edu.cn/*",
-        "*://id.tsinghua.edu.cn/*"
+        "*://id.tsinghua.edu.cn/*",
+        "*://info.tsinghua.edu.cn/*"
       ],
       "js": ["content.js"],
       "run_at": "document_idle",
