@@ -1,2 +1,6 @@
 .idea
 .claude
+build/
+.build-cache/
+.test-home/
+.test-support/
