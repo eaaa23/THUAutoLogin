@@ -119,7 +119,7 @@ cat > "$AGENT_PLIST" <<PLIST
 		<false/>
 	</dict>
 	<key>ProcessType</key>
-	<string>Interactive</string>
+	<string>Adaptive</string>
 	<key>StandardOutPath</key>
 	<string>$LOG_DIR/keyagent.log</string>
 	<key>StandardErrorPath</key>

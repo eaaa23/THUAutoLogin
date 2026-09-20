@@ -275,3 +275,62 @@ CODESIGN_IDENTITY="THUAutoLogin Dev" ./build.sh
 2. **只点可见的那一个。** 页面里有 **两个** `.dehmil`（桌面版 + 移动版布局），其中一个通常被 CSS 隐藏。直接 `querySelector('.dehmil')` 可能拿到隐藏的那个，点击无效。这里用 `getClientRects().length > 0` 过滤（比 `offsetParent !== null` 更稳，对 `position: fixed` 也成立），再点击第一个可见项。
 
 规则表是按顺序匹配的，且 `match` 同时收到 `path` 和 `host`，所以这条按 host 匹配的规则不会误伤 `learn` 上的其它路径。同其它点击类规则一样，它受 `MAX_ATTEMPTS`（3 次）与 `RETRY_AFTER_MS`（3 秒）节流，不会反复点击。
+
+---
+
+## 12. 关于闲置 CPU 占用
+
+**症状**：主机 ② 闲置时仍有 ~0.x% 的 CPU 占用。
+
+**原因**（用 `sample` 抓到的调用栈，不是猜测）：
+
+```
+__CFRunLoopDoTimers
+  └─ __NSFireTimer
+       └─ AgentDelegate.refreshStatus()
+            └─ findChrome()
+                 └─ -[NSRunningApplication bundleIdentifier]
+                      └─ -[NSRunningApplication _fetchStaticInformationWithAtLeastKey:]
+                           └─ _LSCopyApplicationInformation
+                                └─ LSClientToServerConnection::sendWithReply
+                                     └─ xpc_connection_send_message_with_reply_sync   ← 同步 XPC
+```
+
+三个叠加的原因：
+
+1. **主因：`findChrome()` 里对每个运行中的 App 读 `bundleIdentifier`。** 每读一个都是一次**同步 XPC 往返 LaunchServices**（`_LSCopyApplicationInformation`）。原来用 `NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier ... }`，机器上开着几十个进程就是几十次同步 XPC，**每 3 秒一次**。
+2. **`setTitle:` 无条件赋值。** 即使字符串没变，给状态栏按钮设标题也会触发菜单栏重新布局（`-[NSStatusItem _adjustLength]` → `cellSizeForBounds:`）和一次 CoreAnimation 提交重绘。
+3. **`ProcessType: Interactive`** 让 launchd 认为这是前台交互进程，**关闭了 App Nap 和定时器合并**，所以上面这些唤醒全按最高频率执行。
+
+**修复**：
+
+| 改动 | 说明 |
+|---|---|
+| 去掉 3 秒轮询定时器 | 改为**事件驱动**：菜单打开时（`NSMenuDelegate.menuWillOpen`）才刷新；Chrome 启动/退出/切到前台用 `NSWorkspace` 通知触发；用户从系统设置授权后切回来用 `didBecomeActiveNotification` 触发 |
+| `findChrome()` 改用 `NSRunningApplication.runningApplications(withBundleIdentifier:)` | 一次 XPC 查一个 bundle id，而不是一次 XPC 查一个进程 |
+| UI 赋值前先比对 | 只有渲染结果真的变了才写 `title`，避免无意义的重绘 |
+| LaunchAgent `ProcessType: Interactive` → `Adaptive` | 闲置时恢复 App Nap 与定时器合并 |
+
+**验证**（`sample` 前后对比，5~6 秒采样）：
+
+| 符号 | 修复前 | 修复后 |
+|---|---|---|
+| `__NSFireTimer` | 1 | **0** |
+| `refreshStatus` | 2 | **0** |
+| `findChrome` | 1 | **0** |
+| `_LSCopyApplicationInformation` | 1 | **0** |
+| `send_message_with_reply_sync` | 2 | **0** |
+| `setTitle:` | 1 | **0** |
+| `CA::Transaction::commit` | 1 | **0** |
+
+修复后主线程完全阻塞在 `mach_msg2_trap`（等待事件），不再有任何周期性工作；socket 线程阻塞在 `accept()`，同样零开销。
+
+> **注意**：`ProcessType` 的改动需要**重新执行 `install.sh`**（它会重写并重载 LaunchAgent）才会生效。只换二进制不够。
+
+自己复现这份测量：
+
+```bash
+AGENT=$(pgrep -f THUAutoLoginKeyAgent)
+sample $AGENT 5 -file /tmp/agent.txt
+grep -cE '__NSFireTimer|refreshStatus|findChrome|setTitle:' /tmp/agent.txt   # 期望 0
+```

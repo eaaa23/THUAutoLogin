@@ -40,7 +40,8 @@ func requestAccessibility() -> Bool {
  * Chrome discovery                                                    *
  * ------------------------------------------------------------------ */
 
-let chromeBundleIDs: Set<String> = [
+// Ordered by preference: a stable Chrome build wins over beta/canary.
+let chromeBundleIDs: [String] = [
     "com.google.Chrome",
     "com.google.Chrome.beta",
     "com.google.Chrome.dev",
@@ -57,10 +58,18 @@ struct ChromeInstance {
 }
 
 /// Finds the Chrome instance the user is actually looking at.
+///
+/// This deliberately uses the bundle-id query instead of filtering
+/// `NSWorkspace.runningApplications`. Reading `bundleIdentifier` off every
+/// running app costs a *synchronous XPC round-trip to LaunchServices each*
+/// (`_LSCopyApplicationInformation` -> `xpc_connection_send_message_with_reply_sync`),
+/// which is what kept the idle CPU above zero. Asking by bundle id does one
+/// lookup per candidate instead of one per running process.
 func findChrome() -> ChromeInstance? {
-    let candidates = NSWorkspace.shared.runningApplications.filter { app in
-        guard let id = app.bundleIdentifier else { return false }
-        return chromeBundleIDs.contains(id)
+    var candidates: [NSRunningApplication] = []
+    for bundleID in chromeBundleIDs {
+        candidates = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+        if !candidates.isEmpty { break }
     }
     guard !candidates.isEmpty else { return nil }
 
@@ -305,21 +314,58 @@ final class SocketServer {
  * Menu-bar app                                                        *
  * ------------------------------------------------------------------ */
 
-final class AgentDelegate: NSObject, NSApplicationDelegate {
+final class AgentDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem?
     private var statusLine: NSMenuItem?
-    private var refreshTimer: Timer?
+
+    // Last rendered values, so AppKit is only touched when something changed.
+    private var lastIconTitle: String?
+    private var lastStatusText: String?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         SocketServer.shared.start()
         buildMenuBar()
+        observeWorkspace()
         // Ask once at first launch so the app shows up in the Accessibility list.
         _ = requestAccessibility()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        refreshTimer?.invalidate()
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+        NotificationCenter.default.removeObserver(self)
         SocketServer.shared.shutdown()
+    }
+
+    /// Refresh on events instead of on a timer. A 3-second poll meant a
+    /// synchronous LaunchServices XPC round-trip plus a menu-bar relayout every
+    /// tick, which is exactly the idle CPU that showed up in the profile.
+    private func observeWorkspace() {
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        for name in [
+            NSWorkspace.didLaunchApplicationNotification,
+            NSWorkspace.didTerminateApplicationNotification,
+            NSWorkspace.didActivateApplicationNotification,
+        ] {
+            workspaceCenter.addObserver(
+                self, selector: #selector(workspaceChanged), name: name, object: nil
+            )
+        }
+        // Catches the user coming back from System Settings after granting
+        // Accessibility.
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(workspaceChanged),
+            name: NSApplication.didBecomeActiveNotification, object: nil
+        )
+    }
+
+    @objc private func workspaceChanged(_ notification: Notification) {
+        refreshStatus()
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        // The menu is only ever read while it is open, so this is the one place
+        // the status text needs to be accurate.
+        refreshStatus()
     }
 
     private func buildMenuBar() {
@@ -341,7 +387,7 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
 
         let selfTest = NSMenuItem(
-            title: "自检（向 Chrome 发送一次 Shift）",
+            title: "自检（向 Chrome 发送一次 Tab）",
             action: #selector(runSelfTestFromMenu), keyEquivalent: ""
         )
         selfTest.target = self
@@ -366,15 +412,11 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
         let quit = NSMenuItem(title: "退出", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quit)
 
+        menu.delegate = self
         item.menu = menu
         statusItem = item
 
         refreshStatus()
-        let timer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            self?.refreshStatus()
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        refreshTimer = timer
     }
 
     private func refreshStatus() {
@@ -387,8 +429,19 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
             text += "\nChrome：未运行"
         }
 
-        statusLine?.title = text
-        statusItem?.button?.title = trusted ? "THU" : "THU ⚠︎"
+        let icon = trusted ? "THU" : "THU ⚠︎"
+
+        // Assigning a status-item title triggers a menu-bar relayout and a
+        // CoreAnimation commit even when the string is identical, so only write
+        // when the rendered result actually differs.
+        if text != lastStatusText {
+            statusLine?.title = text
+            lastStatusText = text
+        }
+        if icon != lastIconTitle {
+            statusItem?.button?.title = icon
+            lastIconTitle = icon
+        }
     }
 
     @objc private func runSelfTestFromMenu() {
@@ -420,11 +473,11 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        let posted = postKey(pid: chrome.pid, strategy: .shift, delivery: .pid)
+        let posted = postKey(pid: chrome.pid, strategy: .tab, delivery: .pid)
         alert.informativeText = """
         辅助功能权限：已授权
         Chrome：\(chrome.name) (pid \(chrome.pid))，\(chrome.active ? "前台" : "后台")
-        发送 Shift：\(posted ? "成功" : "失败")
+        发送 Tab：\(posted ? "成功" : "失败")
 
         若登录页已打开，页面应已获得“用户交互”，自动填充的账号密码随即对脚本可见。
         """
@@ -471,11 +524,11 @@ func runSelfTestCLI() -> Int32 {
         return 3
     }
 
-    print("3 秒后向 Chrome 发送一次 Shift，请让登录页保持前台…")
+    print("3 秒后向 Chrome 发送一次 Tab，请让登录页保持前台…")
     Thread.sleep(forTimeInterval: 3)
 
-    let ok = postKey(pid: chrome.pid, strategy: .shift, delivery: .pid)
-    print(ok ? "已发送 Shift" : "发送失败")
+    let ok = postKey(pid: chrome.pid, strategy: .tab, delivery: .pid)
+    print(ok ? "已发送 Tab" : "发送失败")
     return ok ? 0 : 4
 }
 
