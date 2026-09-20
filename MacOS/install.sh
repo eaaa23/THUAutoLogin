@@ -12,8 +12,9 @@
 #   EXTENSION_ID=<id>          bash install.sh
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-EXT_DIR="$HERE/THUAutoLogin"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # this MacOS/ directory
+ROOT="$(cd "$HERE/.." && pwd)"                          # repository root
+EXT_DIR="$ROOT/THUAutoLogin"                            # shared with the Windows side
 BUILD_DIR="$HERE/build"
 
 SUPPORT_DIR="$HOME/Library/Application Support/THUAutoLogin"

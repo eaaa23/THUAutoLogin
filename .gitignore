@@ -1,6 +1,15 @@
 .idea
 .claude
+.DS_Store
+
+# build output (matches at any depth: MacOS/build, Windows/build, ...)
 build/
+dist/
 .build-cache/
 .test-home/
 .test-support/
+
+# Python
+__pycache__/
+*.pyc
+*.spec
