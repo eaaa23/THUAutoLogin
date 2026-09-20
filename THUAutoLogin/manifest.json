@@ -3,7 +3,7 @@
   "name": "THU Auto Login",
   "version": "1.0.0",
   "description": "自动点击清华大学网络学堂和信息门户登录页的登录按钮、课程页面的“重新登录”链接",
-  "permissions": ["scripting"],
+  "permissions": ["scripting", "debugger"],
   "host_permissions": ["*://id.tsinghua.edu.cn/*"],
   "background": {
     "service_worker": "background.js"
