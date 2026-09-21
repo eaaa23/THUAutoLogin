@@ -37,8 +37,10 @@ import time
 
 HOST_NAME = "com.thu.autologin.host"
 
-# Top-level window class used by Chrome and other Chromium browsers.
-CHROME_WINDOW_CLASS = "Chrome_WidgetWin_1"
+# Top-level window class shared by Chrome, Edge and other Chromium browsers.
+# Edge is a first-class target: identical autofill, it just needs the Tab
+# pressed twice (handled in the extension, not here).
+BROWSER_WINDOW_CLASS = "Chrome_WidgetWin_1"
 
 # Virtual key codes. This whitelist is the whole keyboard surface this host can
 # ever emit: it can never type a character, so it cannot be abused to inject
@@ -146,13 +148,13 @@ def write_message(stream, payload) -> None:
 # ---------------------------------------------------------------------------
 
 
-def top_level_chrome_windows():
+def top_level_browser_windows():
     """Every visible top-level window using Chrome's window class."""
     found = []
 
     def callback(hwnd, _param):
         try:
-            if win32gui.IsWindowVisible(hwnd) and win32gui.GetClassName(hwnd) == CHROME_WINDOW_CLASS:
+            if win32gui.IsWindowVisible(hwnd) and win32gui.GetClassName(hwnd) == BROWSER_WINDOW_CLASS:
                 found.append((hwnd, win32gui.GetWindowText(hwnd)))
         except Exception:
             pass
@@ -209,15 +211,15 @@ def is_foreground_window(hwnd) -> bool:
         return False
 
 
-def find_chrome_window():
-    """Return (hwnd, title, is_foreground) for the Chrome window to target.
+def find_browser_window():
+    """Return (hwnd, title, is_foreground) for the Chromium browser window to target.
 
     Prefers the foreground window: the extension only asks while the page really
     has focus, so the window the user is looking at is the correct target. That
     also disambiguates Chrome from other Chromium apps sharing the same window
     class, without needing a process-name lookup.
     """
-    candidates = top_level_chrome_windows()
+    candidates = top_level_browser_windows()
     if not candidates:
         return None
 
@@ -263,8 +265,8 @@ def send_key(vk: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-def chrome_summary():
-    target = find_chrome_window()
+def browser_summary():
+    target = find_browser_window()
     if target is None:
         return None
     hwnd, title, foreground = target
@@ -285,7 +287,7 @@ def ping_response():
         "platform": "win32",
         "pywin32": HAVE_PYWIN32,
         "strategies": sorted(STRATEGIES),
-        "chrome": None,
+        "browser": None,
         "windows": [],
     }
     if not HAVE_PYWIN32:
@@ -300,9 +302,9 @@ def ping_response():
             "pid": window_pid(hwnd),
             "foreground": is_foreground_window(hwnd),
         }
-        for hwnd, title in top_level_chrome_windows()
+        for hwnd, title in top_level_browser_windows()
     ]
-    payload["chrome"] = chrome_summary()
+    payload["browser"] = browser_summary()
     return payload
 
 
@@ -315,9 +317,9 @@ def perform_unlock(request):
     if vk is None:
         return {"ok": False, "error": "unknown-strategy"}
 
-    target = find_chrome_window()
+    target = find_browser_window()
     if target is None:
-        return {"ok": False, "error": "chrome-not-running"}
+        return {"ok": False, "error": "browser-not-running"}
 
     hwnd, _title, foreground = target
 
@@ -327,10 +329,10 @@ def perform_unlock(request):
     # application if focus moved in between.
     if not foreground:
         if not request.get("activate"):
-            return {"ok": False, "error": "chrome-not-foreground", "hwnd": hwnd}
+            return {"ok": False, "error": "browser-not-foreground", "hwnd": hwnd}
         activate_window(hwnd)
         if not is_foreground_window(hwnd):
-            return {"ok": False, "error": "chrome-not-foreground", "hwnd": hwnd}
+            return {"ok": False, "error": "browser-not-foreground", "hwnd": hwnd}
 
     send_key(vk)
     _log(f"unlock strategy={strategy} vk=0x{vk:02X} hwnd={hwnd}")
@@ -366,15 +368,15 @@ def cli_selftest() -> int:
         print("请先运行:  pip install pywin32")
         return 3
 
-    windows = top_level_chrome_windows()
+    windows = top_level_browser_windows()
     print(f"Chrome 顶层窗口数: {len(windows)}")
     for hwnd, title in windows:
         pid = window_pid(hwnd)
         print(f"  hwnd={hwnd} pid={pid} fg={is_foreground_window(hwnd)} title={title!r}")
 
-    target = find_chrome_window()
+    target = find_browser_window()
     if target is None:
-        print("未找到 Chrome 窗口")
+        print("未找到 Chromium 浏览器窗口")
         return 2
 
     hwnd, title, foreground = target
@@ -400,9 +402,9 @@ def cli_once(strategy: str) -> int:
         print(f"未知按键策略: {strategy}")
         print("可选: " + ", ".join(sorted(STRATEGIES)))
         return 1
-    target = find_chrome_window()
+    target = find_browser_window()
     if target is None:
-        print("未找到 Chrome 窗口")
+        print("未找到 Chromium 浏览器窗口")
         return 2
     hwnd, _title, foreground = target
     if not foreground:

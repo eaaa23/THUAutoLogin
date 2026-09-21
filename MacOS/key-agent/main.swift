@@ -40,20 +40,27 @@ func requestAccessibility() -> Bool {
  * Chrome discovery                                                    *
  * ------------------------------------------------------------------ */
 
-// Ordered by preference: a stable Chrome build wins over beta/canary.
-let chromeBundleIDs: [String] = [
+// Chromium browsers this agent can drive, ordered by preference so a stable
+// build wins over beta/canary. Edge is a first-class target, not a special
+// case: it uses the same Chromium autofill, it merely needs the Tab pressed
+// twice, which the extension handles.
+let browserBundleIDs: [String] = [
     "com.google.Chrome",
     "com.google.Chrome.beta",
     "com.google.Chrome.dev",
     "com.google.Chrome.canary",
+    "com.microsoft.edgemac",
+    "com.microsoft.edgemac.Beta",
+    "com.microsoft.edgemac.Dev",
+    "com.microsoft.edgemac.Canary",
     "org.chromium.Chromium",
 ]
 
-struct ChromeInstance {
+struct BrowserInstance {
     let app: NSRunningApplication
 
     var pid: pid_t { app.processIdentifier }
-    var name: String { app.localizedName ?? "Chrome" }
+    var name: String { app.localizedName ?? "Chromium browser" }
     var active: Bool { app.isActive }
 }
 
@@ -65,9 +72,9 @@ struct ChromeInstance {
 /// (`_LSCopyApplicationInformation` -> `xpc_connection_send_message_with_reply_sync`),
 /// which is what kept the idle CPU above zero. Asking by bundle id does one
 /// lookup per candidate instead of one per running process.
-func findChrome() -> ChromeInstance? {
+func findBrowser() -> BrowserInstance? {
     var candidates: [NSRunningApplication] = []
-    for bundleID in chromeBundleIDs {
+    for bundleID in browserBundleIDs {
         candidates = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
         if !candidates.isEmpty { break }
     }
@@ -76,7 +83,7 @@ func findChrome() -> ChromeInstance? {
     let chosen = candidates.first { $0.isActive }
         ?? candidates.first { $0.activationPolicy == .regular }
         ?? candidates[0]
-    return ChromeInstance(app: chosen)
+    return BrowserInstance(app: chosen)
 }
 
 /* ------------------------------------------------------------------ *
@@ -140,9 +147,9 @@ func postKey(pid: pid_t, strategy: KeyStrategy, delivery: Delivery) -> Bool {
  * Request handling                                                    *
  * ------------------------------------------------------------------ */
 
-func chromeDescription() -> Any {
-    guard let chrome = findChrome() else { return NSNull() }
-    return ["pid": Int(chrome.pid), "name": chrome.name, "active": chrome.active]
+func browserDescription() -> Any {
+    guard let browser = findBrowser() else { return NSNull() }
+    return ["pid": Int(browser.pid), "name": browser.name, "active": browser.active]
 }
 
 func pingResponse() -> [String: Any] {
@@ -151,7 +158,7 @@ func pingResponse() -> [String: Any] {
         "pong": true,
         "accessibility": isAccessibilityTrusted(prompt: false),
         "strategies": KeyStrategy.allCases.map { $0.rawValue },
-        "chrome": chromeDescription(),
+        "browser": browserDescription(),
     ]
 }
 
@@ -162,20 +169,20 @@ func performUnlock(_ request: [String: Any]) -> [String: Any] {
     guard let strategy = KeyStrategy(rawValue: (request["strategy"] as? String) ?? "shift") else {
         return ["ok": false, "error": "unknown-strategy"]
     }
-    guard let chrome = findChrome() else {
-        return ["ok": false, "error": "chrome-not-running"]
+    guard let browser = findBrowser() else {
+        return ["ok": false, "error": "browser-not-running"]
     }
 
     let delivery = Delivery(rawValue: (request["delivery"] as? String) ?? "pid") ?? .pid
 
     // Escape hatch only: the extension normally refuses to ask while the page is
     // unfocused, so we do not steal focus by default.
-    if (request["activate"] as? Bool) == true, !chrome.active {
-        chrome.app.activate()
+    if (request["activate"] as? Bool) == true, !browser.active {
+        browser.app.activate()
         usleep(150_000)
     }
 
-    guard postKey(pid: chrome.pid, strategy: strategy, delivery: delivery) else {
+    guard postKey(pid: browser.pid, strategy: strategy, delivery: delivery) else {
         return ["ok": false, "error": "post-failed"]
     }
 
@@ -183,7 +190,7 @@ func performUnlock(_ request: [String: Any]) -> [String: Any] {
         "ok": true,
         "strategy": strategy.rawValue,
         "delivery": delivery.rawValue,
-        "pid": Int(chrome.pid),
+        "pid": Int(browser.pid),
     ]
 }
 
@@ -423,8 +430,8 @@ final class AgentDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let trusted = isAccessibilityTrusted(prompt: false)
         var text = trusted ? "辅助功能权限：已授权" : "辅助功能权限：未授权 ⚠︎"
 
-        if let chrome = findChrome() {
-            text += "\nChrome：运行中 (pid \(chrome.pid))"
+        if let browser = findBrowser() {
+            text += "\nChrome：运行中 (pid \(browser.pid))"
         } else {
             text += "\nChrome：未运行"
         }
@@ -464,7 +471,7 @@ final class AgentDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
 
-        guard let chrome = findChrome() else {
+        guard let browser = findBrowser() else {
             alert.informativeText = "未找到正在运行的 Google Chrome 进程。"
             alert.alertStyle = .warning
             alert.addButton(withTitle: "好")
@@ -473,10 +480,10 @@ final class AgentDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
 
-        let posted = postKey(pid: chrome.pid, strategy: .tab, delivery: .pid)
+        let posted = postKey(pid: browser.pid, strategy: .tab, delivery: .pid)
         alert.informativeText = """
         辅助功能权限：已授权
-        Chrome：\(chrome.name) (pid \(chrome.pid))，\(chrome.active ? "前台" : "后台")
+        Chrome：\(browser.name) (pid \(browser.pid))，\(browser.active ? "前台" : "后台")
         发送 Tab：\(posted ? "成功" : "失败")
 
         若登录页已打开，页面应已获得“用户交互”，自动填充的账号密码随即对脚本可见。
@@ -511,11 +518,11 @@ func runSelfTestCLI() -> Int32 {
     let trusted = isAccessibilityTrusted(prompt: true)
     print("辅助功能权限: \(trusted ? "已授权" : "未授权")")
 
-    guard let chrome = findChrome() else {
+    guard let browser = findBrowser() else {
         print("未找到正在运行的 Chrome 进程")
         return 2
     }
-    print("Chrome: \(chrome.name) pid=\(chrome.pid) 前台=\(chrome.active)")
+    print("Chrome: \(browser.name) pid=\(browser.pid) 前台=\(browser.active)")
 
     guard trusted else {
         print("请先在 系统设置 → 隐私与安全性 → 辅助功能 中勾选 \(WirePaths.agentAppName)")
@@ -527,7 +534,7 @@ func runSelfTestCLI() -> Int32 {
     print("3 秒后向 Chrome 发送一次 Tab，请让登录页保持前台…")
     Thread.sleep(forTimeInterval: 3)
 
-    let ok = postKey(pid: chrome.pid, strategy: .tab, delivery: .pid)
+    let ok = postKey(pid: browser.pid, strategy: .tab, delivery: .pid)
     print(ok ? "已发送 Tab" : "发送失败")
     return ok ? 0 : 4
 }
@@ -537,12 +544,12 @@ func runOnce(_ strategy: KeyStrategy, delivery: Delivery) -> Int32 {
         print("辅助功能权限未授予")
         return 3
     }
-    guard let chrome = findChrome() else {
+    guard let browser = findBrowser() else {
         print("未找到正在运行的 Chrome 进程")
         return 2
     }
-    let ok = postKey(pid: chrome.pid, strategy: strategy, delivery: delivery)
-    print("strategy=\(strategy.rawValue) delivery=\(delivery.rawValue) pid=\(chrome.pid) ok=\(ok)")
+    let ok = postKey(pid: browser.pid, strategy: strategy, delivery: delivery)
+    print("strategy=\(strategy.rawValue) delivery=\(delivery.rawValue) pid=\(browser.pid) ok=\(ok)")
     return ok ? 0 : 4
 }
 

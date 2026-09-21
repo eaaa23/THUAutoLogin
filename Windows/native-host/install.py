@@ -298,12 +298,12 @@ def main(argv=None) -> int:
             capture_output=True, text=True, timeout=30,
         )
         payload = json.loads(result.stdout or "{}")
-        chrome = payload.get("chrome")
-        if chrome:
-            say(f"    找到 Chrome 窗口: hwnd={chrome.get('hwnd')} pid={chrome.get('pid')} "
-                f"前台={chrome.get('foreground')}")
+        browser = payload.get("browser")
+        if browser:
+            say(f"    找到浏览器窗口: hwnd={browser.get('hwnd')} pid={browser.get('pid')} "
+                f"前台={browser.get('foreground')}")
         else:
-            say("    未找到 Chrome 窗口（Chrome 没在运行？稍后再试即可）")
+            say("    未找到浏览器窗口（Chrome 没在运行？稍后再试即可）")
     except Exception as exc:
         say(f"    自检未通过: {exc}")
 

@@ -381,12 +381,12 @@ def do_install(silent: bool = False) -> int:
         payload = json.loads(result.stdout or "{}")
         if payload.get("pywin32") is False:
             say(f"    警告: 主机缺少 pywin32: {payload.get('detail')}")
-        chrome = payload.get("chrome")
-        if chrome:
-            say(f"    找到 Chrome 窗口 hwnd={chrome.get('hwnd')} pid={chrome.get('pid')} "
-                f"前台={chrome.get('foreground')}")
+        browser = payload.get("browser")
+        if browser:
+            say(f"    找到浏览器窗口 hwnd={browser.get('hwnd')} pid={browser.get('pid')} "
+                f"前台={browser.get('foreground')}")
         else:
-            say("    暂未找到 Chrome 窗口（Chrome 没在运行也可以稍后再试）")
+            say("    暂未找到浏览器窗口（Chrome 没在运行也可以稍后再试）")
     except Exception as exc:
         print(f"    自检未能完成: {exc}", file=sys.stderr)
 

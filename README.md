@@ -131,6 +131,23 @@ const UNLOCK_LADDER = [
 
 > `shift` 已实测排除：单独按修饰键只产生 `keydown`/`keyup`、不改变输入框内容，Chrome 不认为发生了"编辑"，**无法**解锁自动填充。
 
+### Edge 需要连按两次 Tab
+
+扩展在 Edge 里同样可用。Edge 的密码填充行为略有不同——**要连按两次 Tab 才会提交填充**，所以扩展检测到 Edge 后会把 Tab 这一级连发两次。
+
+浏览器类型在 service worker 里检测：`userAgentData.brands` 优先，UA 字符串兜底（两者都是 Chromium，API 完全一致，只有填充时序不同）。
+
+```js
+const UNLOCK_REPEAT_GAP_MS = 60;   // 两次 Tab 的间隔，需要时可调
+const pressesFor = (step) => (BROWSER === 'edge' && step.strategy === 'tab' ? 2 : 1);
+```
+
+两次按键是**两次独立的 `unlock` 请求**，而不是给主机新增一个"连按"参数——这样扩展可以直接用在已装好的主机上，不必同步升级原生组件。
+
+间隔是**显式控制**的（默认 60 ms），而不是听凭两次 IPC 往返的抖动，因为对页面来说"两次快速轻敲"和"两次独立尝试"是两回事。每次按键前都会重新检查页面焦点，所以用户切走时不会把第二个 Tab 打到别的窗口。
+
+Edge 在 **Windows 上无需任何额外改动**（与 Chrome 共用 `Chrome_WidgetWin_1` 窗口类）；macOS 的按键代理也已把 `com.microsoft.edgemac` 系列加入目标列表，因此 macOS 上的 Edge 同样可用。
+
 如果默认顺序在你的环境里不生效，把有效的那个挪到最前面即可。
 
 ---

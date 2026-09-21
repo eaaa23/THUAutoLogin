@@ -14,6 +14,12 @@
 const NATIVE_HOST = 'com.thu.autologin.host';
 const NATIVE_TIMEOUT_MS = 4000;
 
+// Edge's password fill only commits after a SECOND Tab, so the tab rung is sent
+// twice there. The pair is kept close together on purpose — two fast taps, not
+// two separate attempts — and the gap is explicit rather than left to IPC
+// jitter. Tune here if Edge needs a different spacing.
+const UNLOCK_REPEAT_GAP_MS = 60;
+
 // Escalation ladder. Every entry but the last is a side-effect-free key: it
 // only proves "a real user typed something" so Chrome reveals the value it has
 // already autofilled into the DOM. `enter` additionally triggers the page's own
@@ -27,6 +33,40 @@ const UNLOCK_LADDER = [
   { strategy: 'f15', pollMs: 1000 },
   { strategy: 'enter', pollMs: 4000, submitsPage: true },
 ];
+
+/* ------------------------------------------------------------------ *
+ * Browser detection                                                   *
+ * ------------------------------------------------------------------ */
+
+// Both are Chromium, so both expose the same APIs; only the autofill timing
+// differs. userAgentData.brands is consulted first because it survives user
+// agent reduction, with the UA string as a fallback for older builds.
+const detectBrowser = (nav) => {
+  const source = nav || (typeof navigator !== 'undefined' ? navigator : {});
+
+  try {
+    const brands = source.userAgentData && source.userAgentData.brands;
+    if (Array.isArray(brands)) {
+      if (brands.some((b) => b && /Microsoft Edge/i.test(b.brand))) return 'edge';
+      if (brands.some((b) => b && /Google Chrome/i.test(b.brand))) return 'chrome';
+    }
+  } catch (e) {
+    // fall through to the UA string
+  }
+
+  const ua = source.userAgent || '';
+  // "Edg/" is Chromium Edge ("Edge/" was the legacy engine, which cannot run
+  // Chrome extensions at all — matched only so this stays honest).
+  if (/\bEdge?\//.test(ua)) return 'edge';
+  return 'chrome';
+};
+
+const BROWSER = detectBrowser();
+
+// Number of times a rung's key must be pressed.
+const pressesFor = (step) => (BROWSER === 'edge' && step.strategy === 'tab' ? 2 : 1);
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /* ------------------------------------------------------------------ *
  * Native messaging                                                    *
@@ -169,16 +209,18 @@ const runInPage = async (tabId, frameId, func, args = []) => {
  * Login flow                                                          *
  * ------------------------------------------------------------------ */
 
+const pageHasFocus = () => document.hasFocus();
+
 const isPageFocused = async (tabId, frameId) =>
-  (await runInPage(tabId, frameId, () => document.hasFocus())) === true;
+  (await runInPage(tabId, frameId, pageHasFocus)) === true;
 
 const handleLoginPage = async (tabId, frameId) => {
   const state = await runInPage(tabId, frameId, pageState);
-  if (!state || !state.hasFields) return { ok: false, reason: 'no-login-form' };
+  if (!state || !state.hasFields) return { ok: false, reason: 'no-login-form', browser: BROWSER };
 
   if (state.filled) {
     const submitted = await runInPage(tabId, frameId, callDoLogin);
-    return { ok: Boolean(submitted), reason: 'already-filled' };
+    return { ok: Boolean(submitted), reason: 'already-filled', browser: BROWSER };
   }
 
   await runInPage(tabId, frameId, focusPassword);
@@ -186,20 +228,37 @@ const handleLoginPage = async (tabId, frameId) => {
   let usedStrategy = null;
 
   for (const step of UNLOCK_LADDER) {
-    // Re-check focus right before every keystroke: the user may have switched
-    // away between the content script's check and this moment.
-    if (!(await isPageFocused(tabId, frameId))) {
-      return { ok: false, reason: 'unfocused', strategy: usedStrategy };
+    const presses = pressesFor(step);
+    let delivered = 0;
+    let failure = null;
+
+    for (let i = 0; i < presses; i += 1) {
+      // Re-check focus before every keystroke: focus may have moved since the
+      // content script asked, or since the previous key of this pair.
+      if (!(await isPageFocused(tabId, frameId))) {
+        return { ok: false, reason: 'unfocused', strategy: usedStrategy, browser: BROWSER };
+      }
+
+      const res = await sendNative({ type: 'unlock', strategy: step.strategy });
+      if (!res || res.ok !== true) {
+        failure = res;
+        break;
+      }
+      delivered += 1;
+
+      if (i + 1 < presses) await sleep(UNLOCK_REPEAT_GAP_MS);
     }
 
-    const res = await sendNative({ type: 'unlock', strategy: step.strategy });
-
-    if (!res || res.ok !== true) {
-      // If the very first rung already failed, the key agent is unreachable and
-      // climbing further cannot help. If a later rung failed we still may have
+    if (failure) {
+      // Nothing has been sent yet, so the host itself is unreachable and
+      // climbing further cannot help. If a later rung failed we may still have
       // unlocked the fields, so fall through and let the caller retry.
-      if (!usedStrategy) {
-        return { ok: false, reason: (res && res.error) || 'key-agent-unavailable' };
+      if (!usedStrategy && delivered === 0) {
+        return {
+          ok: false,
+          reason: (failure && failure.error) || 'key-agent-unavailable',
+          browser: BROWSER,
+        };
       }
       break;
     }
@@ -210,14 +269,19 @@ const handleLoginPage = async (tabId, frameId) => {
     if (visible) {
       if (step.submitsPage) {
         // Enter already fired the page's keyLogin(); do not submit twice.
-        return { ok: true, strategy: step.strategy, submittedBy: 'page' };
+        return { ok: true, strategy: step.strategy, submittedBy: 'page', browser: BROWSER };
       }
       const submitted = await runInPage(tabId, frameId, callDoLogin);
-      return { ok: Boolean(submitted), strategy: step.strategy, submittedBy: 'doLogin' };
+      return {
+        ok: Boolean(submitted),
+        strategy: step.strategy,
+        submittedBy: 'doLogin',
+        browser: BROWSER,
+      };
     }
   }
 
-  return { ok: false, reason: 'credentials-not-revealed', strategy: usedStrategy };
+  return { ok: false, reason: 'credentials-not-revealed', strategy: usedStrategy, browser: BROWSER };
 };
 
 /* ------------------------------------------------------------------ *

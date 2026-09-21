@@ -158,7 +158,7 @@ open -a THUAutoLoginKeyAgent --args --selftest
   "pong": true,
   "accessibility": true,
   "strategies": ["shift", "f15", "f16", "tab", "escape", "enter"],
-  "chrome": { "pid": 86946, "name": "Google Chrome", "active": true }
+  "browser": { "pid": 86946, "name": "Google Chrome", "active": true }
 }
 ```
 
@@ -184,6 +184,13 @@ const UNLOCK_LADDER = [
 > **已实测排除 `shift`**：在这台机器上，单独按一下修饰键（Shift）**不足以**让 Chrome 暴露自动填充值——它只产生 `keydown`/`keyup`，不改变输入框内容，Chrome 不认为发生了"编辑"。因此 `shift` 已从阶梯中删除。`tab` 虽然也只移动焦点，但实测可以生效。
 
 如果默认顺序在你的环境里不生效，把有效的那个挪到最前面即可减少延迟。
+
+### Edge
+
+按键代理的目标列表包含 `com.google.Chrome*`、`com.microsoft.edgemac*`（Edge）和 `org.chromium.Chromium`，所以 macOS 上的 Edge 同样可用。
+
+Edge 的密码填充需要**连按两次 Tab**。这由扩展检测浏览器类型后处理（见根目录 README），主机侧不需要任何改动。
+
 
 ### 投递方式 — 请求里的 `delivery`
 
@@ -296,7 +303,7 @@ CODESIGN_IDENTITY="THUAutoLogin Dev" ./build.sh
 __CFRunLoopDoTimers
   └─ __NSFireTimer
        └─ AgentDelegate.refreshStatus()
-            └─ findChrome()
+            └─ findBrowser()
                  └─ -[NSRunningApplication bundleIdentifier]
                       └─ -[NSRunningApplication _fetchStaticInformationWithAtLeastKey:]
                            └─ _LSCopyApplicationInformation
@@ -306,7 +313,7 @@ __CFRunLoopDoTimers
 
 三个叠加的原因：
 
-1. **主因：`findChrome()` 里对每个运行中的 App 读 `bundleIdentifier`。** 每读一个都是一次**同步 XPC 往返 LaunchServices**（`_LSCopyApplicationInformation`）。原来用 `NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier ... }`，机器上开着几十个进程就是几十次同步 XPC，**每 3 秒一次**。
+1. **主因：`findBrowser()` 里对每个运行中的 App 读 `bundleIdentifier`。** 每读一个都是一次**同步 XPC 往返 LaunchServices**（`_LSCopyApplicationInformation`）。原来用 `NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier ... }`，机器上开着几十个进程就是几十次同步 XPC，**每 3 秒一次**。
 2. **`setTitle:` 无条件赋值。** 即使字符串没变，给状态栏按钮设标题也会触发菜单栏重新布局（`-[NSStatusItem _adjustLength]` → `cellSizeForBounds:`）和一次 CoreAnimation 提交重绘。
 3. **`ProcessType: Interactive`** 让 launchd 认为这是前台交互进程，**关闭了 App Nap 和定时器合并**，所以上面这些唤醒全按最高频率执行。
 
@@ -315,7 +322,7 @@ __CFRunLoopDoTimers
 | 改动 | 说明 |
 |---|---|
 | 去掉 3 秒轮询定时器 | 改为**事件驱动**：菜单打开时（`NSMenuDelegate.menuWillOpen`）才刷新；Chrome 启动/退出/切到前台用 `NSWorkspace` 通知触发；用户从系统设置授权后切回来用 `didBecomeActiveNotification` 触发 |
-| `findChrome()` 改用 `NSRunningApplication.runningApplications(withBundleIdentifier:)` | 一次 XPC 查一个 bundle id，而不是一次 XPC 查一个进程 |
+| `findBrowser()` 改用 `NSRunningApplication.runningApplications(withBundleIdentifier:)` | 一次 XPC 查一个 bundle id，而不是一次 XPC 查一个进程 |
 | UI 赋值前先比对 | 只有渲染结果真的变了才写 `title`，避免无意义的重绘 |
 | LaunchAgent `ProcessType: Interactive` → `Adaptive` | 闲置时恢复 App Nap 与定时器合并 |
 
@@ -325,7 +332,7 @@ __CFRunLoopDoTimers
 |---|---|---|
 | `__NSFireTimer` | 1 | **0** |
 | `refreshStatus` | 2 | **0** |
-| `findChrome` | 1 | **0** |
+| `findBrowser` | 1 | **0** |
 | `_LSCopyApplicationInformation` | 1 | **0** |
 | `send_message_with_reply_sync` | 2 | **0** |
 | `setTitle:` | 1 | **0** |
@@ -340,5 +347,5 @@ __CFRunLoopDoTimers
 ```bash
 AGENT=$(pgrep -f THUAutoLoginKeyAgent)
 sample $AGENT 5 -file /tmp/agent.txt
-grep -cE '__NSFireTimer|refreshStatus|findChrome|setTitle:' /tmp/agent.txt   # 期望 0
+grep -cE '__NSFireTimer|refreshStatus|findBrowser|setTitle:' /tmp/agent.txt   # 期望 0
 ```

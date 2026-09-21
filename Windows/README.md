@@ -39,7 +39,7 @@ macOS 上不得不拆成两个原生组件，因为 TCC（隐私权限）按 **r
 - 优先选择**当前前台**的那一个（扩展只在页面确实有焦点时才发请求，所以前台窗口就是正确目标）；
 - 这个判断顺带解决了"`Chrome_WidgetWin_1` 也被其它 Chromium 浏览器使用"的歧义，不需要再查进程名。
 
-如果目标窗口不在前台，主机**拒绝发送**并返回 `chrome-not-foreground`。这是继扩展 `document.hasFocus()` 之后的第二道防线：即使焦点在两次检查之间漂移，按键也不会落到别的程序里。
+如果目标窗口不在前台，主机**拒绝发送**并返回 `browser-not-foreground`。这是继扩展 `document.hasFocus()` 之后的第二道防线：即使焦点在两次检查之间漂移，按键也不会落到别的程序里。
 
 ---
 
@@ -144,7 +144,7 @@ python "%LOCALAPPDATA%\THUAutoLogin\thu_autologin_host.py" --once tab
   "platform": "win32",
   "pywin32": true,
   "strategies": ["enter", "escape", "f15", "f16", "shift", "tab"],
-  "chrome": {
+  "browser": {
     "hwnd": 1234567,
     "title": "登录 - Google Chrome",
     "pid": 4321,
@@ -191,6 +191,12 @@ const UNLOCK_LADDER = [
 
 逐级尝试，每级之后轮询确认自动填充值是否已对 JS 可见。走到 `enter` 就不再多调用一次 `doLogin()`，避免重复提交。
 
+### Edge 的差异：Tab 要连按两次
+
+扩展到 Edge 也能直接用，但 Edge 的密码填充**需要连按两次 Tab** 才提交。扩展会自行检测浏览器类型（`userAgentData.brands` 优先，UA 兜底），只在 Edge 上把 Tab 这一级连发两次，间隔由 `UNLOCK_REPEAT_GAP_MS` 控制（默认 60 ms）。
+
+两次按键是两次独立的 `unlock` 请求，因此**主机侧不需要任何改动**。
+
 如果 Windows 上默认顺序不生效，把有效的那个挪到最前面即可。
 
 ---
@@ -203,8 +209,8 @@ const UNLOCK_LADDER = [
 | `Access to the specified native messaging host is forbidden` | 清单里 `allowed_origins` 的 ID 与实际扩展 ID 不一致 | 重跑 `install.py`（它会读 Chrome 配置重新检测） |
 | `Native host has exited` | 主机启动即崩 | 见下方「Chrome 会附加自己的命令行参数」；再用 `--ping` 手动跑一遍看报错 |
 | 主机报 `unrecognized arguments: chrome-extension://… --parent-window=0` | 用 `argparse.parse_args()` 解析了 Chrome 附加的参数 | **已修复**（改用 `parse_known_args`）；若你本地改过，见下方说明 |
-| 返回 `chrome-not-foreground` | Chrome 不在前台 | 保持登录页在前台；或让扩展在切回标签页时重试（已内置） |
-| 返回 `chrome-not-running` | 没枚举到 Chrome 窗口 | 确认 Chrome 正在运行；若用的是其它 Chromium 浏览器，类名相同也能被识别 |
+| 返回 `browser-not-foreground` | 浏览器不在前台 | 保持登录页在前台；或让扩展在切回标签页时重试（已内置） |
+| 返回 `browser-not-running` | 没枚举到 Chromium 浏览器窗口 | 确认 Chrome / Edge 正在运行；两者共用 `Chrome_WidgetWin_1` 窗口类，都能被识别 |
 | 按键发了但输入框仍为空 | Chrome 没有自动填充（没保存凭据），或按键不足以解锁 | 确认 Chrome 能弹出该站点的密码建议；调整解锁阶梯 |
 | 中文/空格路径导致启动失败 | `.cmd` 以 ANSI 代码页编码 | 安装器已优先用 `mbcs` 写入；若仍失败，改用 PyInstaller 打 exe |
 | 虚拟环境被删除后失效 | 启动器固定了 `sys.executable` | 用系统 Python 重装，或改用 exe |
