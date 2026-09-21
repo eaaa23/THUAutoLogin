@@ -9,6 +9,84 @@
 | `id.tsinghua.edu.cn/do/off/ui/auth/login/form/*` | 页面有焦点 | 通过原生主机注入**真实按键**解锁 Chrome 自动填充，再调用页面 `doLogin()` |
 | `info.tsinghua.edu.cn/*` | 存在**可见**的 `span.dehmil`（即未登录） | 点击该登录按钮 |
 
+先看 [快速开始](#快速开始) 安装，原理与实现在文末。
+
+---
+
+## 快速开始
+
+两端都是**用户级安装，不需要管理员权限**；扩展在 `THUAutoLogin/`，两端共享。
+
+### macOS
+
+```bash
+cd MacOS
+./build.sh      # 需要 Xcode Command Line Tools
+./install.sh    # 安装到用户目录，无需 sudo
+```
+
+随后：**系统设置 → 隐私与安全性 → 辅助功能** 勾选 `THUAutoLoginKeyAgent`；在 `chrome://extensions` 重新加载扩展。详见 [`MacOS/README.md`](MacOS/README.md)。
+
+### Windows
+
+```powershell
+python -m pip install pywin32
+python Windows\native-host\install.py
+```
+
+随后**重启 Chrome**，并在 `chrome://extensions` 确认扩展已加载。详见 [`Windows/README.md`](Windows/README.md)。
+
+### 扩展 ID 会因平台而异
+
+Chrome 用**未打包扩展目录绝对路径的 SHA-256** 推导扩展 ID，所以同一份扩展在 macOS 与 Windows 上的 ID **不同**，两端的安装脚本各自负责把它写进原生消息清单：
+
+- macOS `install.sh`：由路径计算；
+- Windows `install.py`：**直接读 Chrome 配置**取出 ID（更可靠），读不到才回退到计算。
+
+移动扩展目录会改变 ID，需要重跑对应的安装脚本。
+
+---
+
+## 目录结构
+
+```
+AutoLogin/
+├── THUAutoLogin/          Chrome 扩展（两端共享）
+│   ├── manifest.json      nativeMessaging 权限；已移除 debugger
+│   ├── background.js      原生消息通道 + 解锁阶梯 + 调用 doLogin()
+│   └── content.js         页面规则 + 焦点把关
+├── MacOS/                 macOS 实现
+│   ├── shared/            两个主机共用的 socket / 分帧工具
+│   ├── native-host/       主机①：native messaging host
+│   ├── key-agent/         主机②：菜单栏 App（持有辅助功能权限）
+│   ├── build.sh  install.sh  uninstall.sh
+│   └── README.md          详细的 macOS 文档
+└── Windows/               Windows 实现
+    ├── native-host/
+    │   ├── thu_autologin_host.py   唯一原生主机
+    │   ├── install.py  uninstall.py
+    │   └── requirements.txt
+    └── README.md          详细的 Windows 文档
+```
+
+---
+
+## 解锁阶梯（两端共用）
+
+```js
+const UNLOCK_LADDER = [
+  { strategy: 'tab',   pollMs: 1000 },
+  { strategy: 'f15',   pollMs: 1000 },
+  { strategy: 'enter', pollMs: 4000, submitsPage: true },
+];
+```
+
+逐级尝试，每级之后轮询确认自动填充值是否已对 JS 可见；走到 `enter` 时它会**同时触发页面自身的 `keyLogin()`**，因此那一步之后不再调用 `doLogin()`，避免重复提交。
+
+> `shift` 已实测排除：单独按修饰键只产生 `keydown`/`keyup`、不改变输入框内容，Chrome 不认为发生了"编辑"，**无法**解锁自动填充。
+
+如果默认顺序在你的环境里不生效，把有效的那个挪到最前面即可。
+
 ---
 
 ## 为什么需要原生主机
@@ -72,77 +150,3 @@ Windows 没有这个机制：Chrome 启动的进程可以直接调用 `keybd_eve
 | 焦点策略 | 页面无焦点则不发送；主机侧再校验一次 |
 
 **按键白名单是主机能发出的全部键盘能力**——它无法输入任何字符，所以不可能被用来注入密码或命令。两端都不读取、不记录、不传输任何凭据。
-
----
-
-## 目录结构
-
-```
-AutoLogin/
-├── THUAutoLogin/          Chrome 扩展（两端共享）
-│   ├── manifest.json      nativeMessaging 权限；已移除 debugger
-│   ├── background.js      原生消息通道 + 解锁阶梯 + 调用 doLogin()
-│   └── content.js         页面规则 + 焦点把关
-├── MacOS/                 macOS 实现
-│   ├── shared/            两个主机共用的 socket / 分帧工具
-│   ├── native-host/       主机①：native messaging host
-│   ├── key-agent/         主机②：菜单栏 App（持有辅助功能权限）
-│   ├── build.sh  install.sh  uninstall.sh
-│   └── README.md          详细的 macOS 文档
-└── Windows/               Windows 实现
-    ├── native-host/
-    │   ├── thu_autologin_host.py   唯一原生主机
-    │   ├── install.py  uninstall.py
-    │   └── requirements.txt
-    └── README.md          详细的 Windows 文档
-```
-
----
-
-## 快速开始
-
-### macOS
-
-```bash
-cd MacOS
-./build.sh      # 需要 Xcode Command Line Tools
-./install.sh    # 安装到用户目录，无需 sudo
-```
-
-随后：**系统设置 → 隐私与安全性 → 辅助功能** 勾选 `THUAutoLoginKeyAgent`；在 `chrome://extensions` 重新加载扩展。详见 [`MacOS/README.md`](MacOS/README.md)。
-
-### Windows
-
-```powershell
-python -m pip install pywin32
-python Windows\native-host\install.py
-```
-
-随后**重启 Chrome**，并在 `chrome://extensions` 确认扩展已加载。详见 [`Windows/README.md`](Windows/README.md)。
-
-### 扩展 ID 会因平台而异
-
-Chrome 用**未打包扩展目录绝对路径的 SHA-256** 推导扩展 ID，所以同一份扩展在 macOS 与 Windows 上的 ID **不同**，两端的安装脚本各自负责把它写进原生消息清单：
-
-- macOS `install.sh`：由路径计算；
-- Windows `install.py`：**直接读 Chrome 配置**取出 ID（更可靠），读不到才回退到计算。
-
-移动扩展目录会改变 ID，需要重跑对应的安装脚本。
-
----
-
-## 解锁阶梯（两端共用）
-
-```js
-const UNLOCK_LADDER = [
-  { strategy: 'tab',   pollMs: 1000 },
-  { strategy: 'f15',   pollMs: 1000 },
-  { strategy: 'enter', pollMs: 4000, submitsPage: true },
-];
-```
-
-逐级尝试，每级之后轮询确认自动填充值是否已对 JS 可见；走到 `enter` 时它会**同时触发页面自身的 `keyLogin()`**，因此那一步之后不再调用 `doLogin()`，避免重复提交。
-
-> `shift` 已实测排除：单独按修饰键只产生 `keydown`/`keyup`、不改变输入框内容，Chrome 不认为发生了"编辑"，**无法**解锁自动填充。
-
-如果默认顺序在你的环境里不生效，把有效的那个挪到最前面即可。
