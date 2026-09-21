@@ -185,6 +185,42 @@ const UNLOCK_LADDER = [
 
 如果默认顺序在你的环境里不生效，把有效的那个挪到最前面即可减少延迟。
 
+### 校验 / 修复扩展 ID
+
+原生消息清单里的 `allowed_origins` 是**构建时**由扩展安装路径推导出来的。如果它和浏览器实际使用的 ID 对不上，浏览器会拒绝连接，报：
+
+```
+Access to the specified native messaging host is forbidden
+```
+
+菜单栏 **THU → 校验 / 修复扩展 ID** 可以直接排查并修好。它的做法是**读回浏览器自己记录的 ID**（不再依赖路径推导），发现清单对不上就重写用户级清单——用户级清单既是 Chrome 优先读取的位置，也是这个 App 无需 root 就能写的位置。
+
+命令行等价用法：
+
+```bash
+/Applications/THUAutoLoginKeyAgent.app/Contents/MacOS/THUAutoLoginKeyAgent --verify-id
+```
+
+它同时校验**两件事**：`allowed_origins` 是否包含该扩展 ID，以及 `path` 指向的主机程序是否就是当前安装的那一个（清单可以「ID 对但指向不存在的旧主机」，同样连不上）。
+
+> 调试用：`THU_AUTOLOGIN_HOME=<dir>` 可以把浏览器配置/清单的查找根目录换到别处，便于在不碰真实 Chrome 配置的情况下测试。
+
+### ⚠️ 不要同时安装 .pkg 版本和本脚本版本
+
+两者使用**同一个原生消息主机名**，但扩展路径不同 → 扩展 ID 不同，而且清单装在**不同位置**：
+
+| 安装方式 | 清单位置 | 扩展路径 |
+|---|---|---|
+| `MacInstaller` 的 `.pkg` | `/Library/Google/Chrome/NativeMessagingHosts/`（系统级） | `/Library/Application Support/THUAutoLogin/extension` |
+| `MacOS/install.sh` | `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/`（用户级） | 仓库里的 `THUAutoLogin/` |
+
+Chrome **优先读用户级**，所以后装的那个会遮蔽另一个，而它们的扩展 ID 不同 → 直接报上面的错误。
+
+因此：
+
+- `.pkg` 的 `postinstall` 会把冲突的用户级清单**改名备份**（`.pre-pkg-<时间戳>.bak`），确保系统级清单生效；
+- `MacOS/install.sh` 检测到系统级安装时会**拒绝继续**并给出二选一的处理办法；确认要强制覆盖时用 `FORCE=1 bash install.sh`。
+
 ### Edge
 
 按键代理的目标列表包含 `com.google.Chrome*`、`com.microsoft.edgemac*`（Edge）和 `org.chromium.Chromium`，所以 macOS 上的 Edge 同样可用。

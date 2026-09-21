@@ -87,6 +87,236 @@ func findBrowser() -> BrowserInstance? {
 }
 
 /* ------------------------------------------------------------------ *
+ * Extension ID verification / repair                                  *
+ *
+ * The bundle id / manifest are guessed at build time from the extension's
+ * install path. This reads back the ID the browser ACTUALLY computed and, if
+ * the manifest disagrees, rewrites the per-user manifest — which is both the
+ * location Chrome consults first and the one this agent can write without root.
+ * ------------------------------------------------------------------ */
+
+let HOST_NAME = "com.thu.autologin.host"
+let EXTENSION_UNPACKED_LOCATION = 4
+
+struct LoadedExtension {
+    let browser: String
+    let profile: String
+    let id: String
+}
+
+/// Chrome extension IDs are 32 characters drawn from a-p. Anything else in a
+/// preferences file is not an ID we should ever write into a manifest.
+func isValidExtensionId(_ value: String) -> Bool {
+    guard value.count == 32 else { return false }
+    return value.allSatisfy { $0 >= "a" && $0 <= "p" }
+}
+
+/// Home directory used to locate browser profiles and manifests.
+///
+/// THU_AUTOLOGIN_HOME overrides it, so this logic can be exercised without
+/// reading or writing the real Chrome/Edge profile (same idea as the existing
+/// THU_AUTOLOGIN_SUPPORT_DIR / THU_AUTOLOGIN_NO_PROMPT knobs).
+func browserHome() -> URL {
+    let environment = ProcessInfo.processInfo.environment
+    if let override = environment["THU_AUTOLOGIN_HOME"], !override.isEmpty {
+        return URL(fileURLWithPath: override, isDirectory: true)
+    }
+    return FileManager.default.homeDirectoryForCurrentUser
+}
+
+/// Where this install put things. The system (.pkg) layout wins when present.
+func installedLayout() -> (extensionDir: URL, hostPath: String)? {
+    let home = browserHome()
+    let bases = [
+        URL(fileURLWithPath: "/Library/Application Support/THUAutoLogin"),
+        home.appendingPathComponent("Library/Application Support/THUAutoLogin"),
+    ]
+    for base in bases {
+        let extensionDir = base.appendingPathComponent("extension")
+        if FileManager.default.fileExists(atPath: extensionDir.path) {
+            return (extensionDir, base.appendingPathComponent("bin/thu-autologin-host").path)
+        }
+    }
+    return nil
+}
+
+func browserUserDataRoots() -> [(String, URL)] {
+    let home = browserHome()
+    let support = home.appendingPathComponent("Library/Application Support")
+    let all: [(String, URL)] = [
+        ("Chrome", support.appendingPathComponent("Google/Chrome")),
+        ("Chrome Beta", support.appendingPathComponent("Google/Chrome Beta")),
+        ("Chrome Canary", support.appendingPathComponent("Google/Chrome Canary")),
+        ("Edge", support.appendingPathComponent("Microsoft Edge")),
+        ("Edge Beta", support.appendingPathComponent("Microsoft Edge Beta")),
+        ("Chromium", support.appendingPathComponent("Chromium")),
+    ]
+    return all.filter { FileManager.default.fileExists(atPath: $0.1.path) }
+}
+
+/// The IDs the browsers themselves recorded for the unpacked extension at
+/// `extensionDir`. Authoritative: no path-hashing assumptions involved.
+func loadedExtensions(at extensionDir: URL) -> [LoadedExtension] {
+    let target = (extensionDir.path as NSString).standardizingPath
+    var found: [LoadedExtension] = []
+
+    for (browserName, root) in browserUserDataRoots() {
+        let profiles = (try? FileManager.default.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: [.isDirectoryKey]
+        )) ?? []
+
+        for profileDir in profiles {
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: profileDir.path, isDirectory: &isDirectory),
+                  isDirectory.boolValue else { continue }
+
+            for fileName in ["Secure Preferences", "Preferences"] {
+                let fileURL = profileDir.appendingPathComponent(fileName)
+                guard let data = try? Data(contentsOf: fileURL),
+                      let parsed = try? JSONSerialization.jsonObject(with: data),
+                      let top = parsed as? [String: Any],
+                      let extensions = top["extensions"] as? [String: Any],
+                      let settings = extensions["settings"] as? [String: Any]
+                else { continue }
+
+                for (identifier, value) in settings {
+                    guard let entry = value as? [String: Any],
+                          (entry["location"] as? Int) == EXTENSION_UNPACKED_LOCATION,
+                          let recorded = entry["path"] as? String,
+                          isValidExtensionId(identifier)
+                    else { continue }
+
+                    let candidate = recorded.hasPrefix("/")
+                        ? recorded
+                        : profileDir.appendingPathComponent(recorded).path
+                    if (candidate as NSString).standardizingPath == target {
+                        found.append(LoadedExtension(
+                            browser: browserName,
+                            profile: profileDir.lastPathComponent,
+                            id: identifier
+                        ))
+                    }
+                }
+            }
+        }
+    }
+    return found
+}
+
+struct ManifestSummary {
+    let origins: [String]
+    let hostPath: String
+}
+
+func manifestSummary(at url: URL) -> ManifestSummary? {
+    guard let data = try? Data(contentsOf: url),
+          let parsed = try? JSONSerialization.jsonObject(with: data),
+          let top = parsed as? [String: Any],
+          let origins = top["allowed_origins"] as? [String],
+          let hostPath = top["path"] as? String
+    else { return nil }
+    return ManifestSummary(origins: origins, hostPath: hostPath)
+}
+
+func userManifestURL() -> URL {
+    browserHome()
+        .appendingPathComponent("Library/Application Support/Google/Chrome/NativeMessagingHosts", isDirectory: true)
+        .appendingPathComponent("\(HOST_NAME).json")
+}
+
+func systemManifestURL() -> URL {
+    URL(fileURLWithPath: "/Library/Google/Chrome/NativeMessagingHosts/\(HOST_NAME).json")
+}
+
+func writeUserManifest(hostPath: String, extensionId: String) throws -> URL {
+    let url = userManifestURL()
+    try FileManager.default.createDirectory(
+        at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+    )
+    let manifest: [String: Any] = [
+        "name": HOST_NAME,
+        "description": "THU Auto Login native messaging host",
+        "path": hostPath,
+        "type": "stdio",
+        "allowed_origins": ["chrome-extension://\(extensionId)/"],
+    ]
+    let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted])
+    try data.write(to: url)
+    return url
+}
+
+/// Check the installed manifest against what the browser actually loaded, and
+/// repair it when they disagree. Returns a human-readable report.
+func verifyAndRepairExtensionId() -> String {
+    guard let layout = installedLayout() else {
+        return """
+        没有找到已安装的扩展目录。
+
+        请先安装（MacInstaller 的 .pkg，或 MacOS/install.sh）。
+        """
+    }
+
+    let loaded = loadedExtensions(at: layout.extensionDir)
+    guard let authoritative = loaded.first else {
+        return """
+        未在 Chrome / Edge 的配置里找到该扩展。
+
+        请确认已经加载了这个文件夹：
+            \(layout.extensionDir.path)
+
+        chrome://extensions → 开发者模式 → 加载已解压的扩展程序。
+        加载完成后保持浏览器运行，再点一次本项。
+        """
+    }
+
+    let expected = "chrome-extension://\(authoritative.id)/"
+    let user = manifestSummary(at: userManifestURL())
+    let system = manifestSummary(at: systemManifestURL())
+
+    // Chrome consults the per-user manifest first, so that is the one that
+    // decides. (A stale per-user manifest shadowing a correct system one is
+    // exactly the failure this exists to clear.)
+    let effectiveName = user != nil ? "用户级" : (system != nil ? "系统级" : nil)
+    let effective = user ?? system
+
+    let source = "\(authoritative.browser) · \(authoritative.profile)"
+    let others = loaded.dropFirst().map { "\($0.browser) · \($0.profile)" }.joined(separator: "、")
+    var report = "浏览器实际使用的扩展 ID：\(authoritative.id)\n来源：\(source)"
+    if !others.isEmpty { report += "\n其它位置也加载了同一扩展：\(others)" }
+
+    // Both halves matter: a manifest can name the right extension but point at
+    // a host binary that is not there (a leftover from the other install
+    // layout), and the extension still will not connect.
+    if let effective, effective.origins.contains(expected), effective.hostPath == layout.hostPath {
+        return "扩展 ID 与主机路径都正确，无需修复。\n\n" + report
+    }
+
+    var reason = ""
+    if let effective {
+        let originsOK = effective.origins.contains(expected)
+        let pathOK = effective.hostPath == layout.hostPath
+        if !originsOK && !pathOK {
+            reason = "\(effectiveName ?? "")清单里的扩展 ID 和主机路径都不对，已覆盖。"
+        } else if !originsOK {
+            reason = "\(effectiveName ?? "")清单里的扩展 ID 与浏览器不一致，已覆盖。"
+        } else {
+            reason = "\(effectiveName ?? "")清单指向的主机路径不存在：\(effective.hostPath)，已覆盖。"
+        }
+    } else {
+        reason = "没有找到原生消息清单，已写入用户级清单。"
+    }
+
+    do {
+        let url = try writeUserManifest(hostPath: layout.hostPath, extensionId: authoritative.id)
+        let out = "已修复。\n\n" + report + "\n\n" + reason
+            + "\n\n已写入：\n\(url.path)\n\n请重启浏览器使其生效。"
+        return out
+    } catch {
+        return "修复失败：\(error.localizedDescription)\n\n请手动检查：\n\(userManifestURL().path)"
+    }
+}
+
+/* ------------------------------------------------------------------ *
  * Key posting                                                         *
  * ------------------------------------------------------------------ */
 
@@ -400,6 +630,13 @@ final class AgentDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         selfTest.target = self
         menu.addItem(selfTest)
 
+        let repair = NSMenuItem(
+            title: "校验 / 修复扩展 ID",
+            action: #selector(verifyExtensionIdFromMenu), keyEquivalent: ""
+        )
+        repair.target = self
+        menu.addItem(repair)
+
         let axSettings = NSMenuItem(
             title: "打开“辅助功能”设置…",
             action: #selector(openAccessibilitySettings), keyEquivalent: ""
@@ -494,6 +731,18 @@ final class AgentDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         alert.runModal()
     }
 
+    @objc private func verifyExtensionIdFromMenu() {
+        let report = verifyAndRepairExtensionId()
+        let alert = NSAlert()
+        alert.messageText = "扩展 ID 校验"
+        alert.informativeText = report
+        alert.alertStyle = report.hasPrefix("已修复") || report.hasPrefix("扩展 ID 正确")
+            ? .informational : .warning
+        alert.addButton(withTitle: "好")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+    }
+
     @objc private func openAccessibilitySettings() {
         openSettings("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
     }
@@ -557,6 +806,11 @@ let arguments = CommandLine.arguments
 
 if arguments.contains("--selftest") {
     exit(runSelfTestCLI())
+}
+
+if arguments.contains("--verify-id") {
+    print(verifyAndRepairExtensionId())
+    exit(0)
 }
 
 if arguments.contains("--ping") {

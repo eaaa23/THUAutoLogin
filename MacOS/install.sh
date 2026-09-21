@@ -36,6 +36,39 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 [ -d "$BUILD_DIR/$APP_NAME.app" ] || die "build artifacts missing; run ./build.sh first"
 
 # ---------------------------------------------------------------------------
+# A system-wide install (from MacInstaller/build-pkg.sh) uses the SAME native
+# messaging host name, and Chrome consults the per-user directory before the
+# system one. Running both therefore leaves the per-user manifest shadowing the
+# system one, with a different extension ID — which shows up as
+# "Access to the specified native messaging host is forbidden".
+#
+# Refuse to create that state unless the user explicitly asks for it.
+# ---------------------------------------------------------------------------
+SYSTEM_NM_DIR="/Library/Google/Chrome/NativeMessagingHosts"
+SYSTEM_NM_MANIFEST="$SYSTEM_NM_DIR/$HOST_NAME.json"
+SYSTEM_SUPPORT="/Library/Application Support/THUAutoLogin"
+
+if [ -f "$SYSTEM_NM_MANIFEST" ] && [ "${FORCE:-0}" != "1" ]; then
+  say ""
+  say "检测到已安装的 .pkg 版本（系统级）："
+  say "    $SYSTEM_NM_MANIFEST"
+  say ""
+  say "它和本脚本安装的用户级清单同名，但扩展 ID 不同。Chrome 会优先使用用户级清单，"
+  say "两者并存会让浏览器拒绝连接原生主机（Access to the specified native messaging"
+  say "host is forbidden）。"
+  say ""
+  say "请二选一："
+  say "  1. 想用 .pkg 安装 —— 不要再运行本脚本，或者先卸载系统级安装："
+  say "         sudo \"$SYSTEM_SUPPORT/uninstall.sh\""
+  say "  2. 想用本脚本（开发）—— 先移除系统级安装，再重新运行："
+  say "         sudo rm -f \"$SYSTEM_NM_MANIFEST\""
+  say "         sudo rm -rf \"$SYSTEM_SUPPORT\" \"/Applications/$APP_NAME.app\""
+  say ""
+  say "确认要强制继续（会覆盖用户级清单）：FORCE=1 bash install.sh"
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
 # Determine the extension ID.
 #
 # Chrome derives an unpacked extension's ID from the SHA-256 of its absolute

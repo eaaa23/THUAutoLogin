@@ -131,6 +131,23 @@ const UNLOCK_LADDER = [
 
 > `shift` 已实测排除：单独按修饰键只产生 `keydown`/`keyup`、不改变输入框内容，Chrome 不认为发生了"编辑"，**无法**解锁自动填充。
 
+### 扩展 ID 对不上怎么办
+
+`id.tsinghua.edu.cn` 不工作时，最常见的原因是原生消息清单里的 `allowed_origins` 和浏览器实际使用的扩展 ID 不一致，报错形如：
+
+```
+Access to the specified native messaging host is forbidden
+```
+
+| 平台 | 排查方式 |
+|---|---|
+| Windows | 运行 `%LOCALAPPDATA%\THUAutoLogin\THUAutoLogin-Setup.exe`，在第 2 步点**读取浏览器配置** |
+| macOS | 菜单栏 **THU → 校验 / 修复扩展 ID**，或 `THUAutoLoginKeyAgent --verify-id` |
+
+两者都是**读回浏览器自己记录的 ID**，不再依赖路径推导。
+
+> macOS 上还有一个坑：`.pkg` 装的是**系统级**清单，开发用的 `MacOS/install.sh` 装的是**用户级**清单，两者同名但扩展 ID 不同，而 Chrome 优先读用户级。**同时安装两者会互相遮蔽。** `.pkg` 的 postinstall 会自动把冲突的用户级清单备份移走，`MacOS/install.sh` 也会拒绝在检测到系统级安装时继续。
+
 ### Edge 需要连按两次 Tab
 
 扩展在 Edge 里同样可用。Edge 的密码填充行为略有不同——**要连按两次 Tab 才会提交填充**，所以扩展检测到 Edge 后会把 Tab 这一级连发两次。

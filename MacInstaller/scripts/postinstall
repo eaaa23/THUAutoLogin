@@ -44,6 +44,29 @@ fi
 HOME_DIR="$(dscl . -read "/Users/$CONSOLE_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
 USER_UID="$(id -u "$CONSOLE_USER" 2>/dev/null || echo '')"
 
+# A per-user manifest has the same host name as the system-wide one this package
+# installs, but Chrome consults the per-user directory FIRST. An older per-user
+# install (MacOS/install.sh) would therefore shadow ours — and because its
+# extension ID differs (it is derived from a different extension path), the
+# browser would reject the extension with "Access to the specified native
+# messaging host is forbidden".
+#
+# Back it up and move it aside so the system-wide manifest is unambiguous.
+if [ -n "$HOME_DIR" ]; then
+  USER_NM_DIR="$HOME_DIR/Library/Application Support/Google/Chrome/NativeMessagingHosts"
+  USER_MANIFEST="$USER_NM_DIR/com.thu.autologin.host.json"
+  if [ -f "$USER_MANIFEST" ]; then
+    BACKUP="$USER_MANIFEST.pre-pkg-$(date +%Y%m%d%H%M%S).bak"
+    if mv "$USER_MANIFEST" "$BACKUP" 2>/dev/null; then
+      echo "moved the conflicting per-user manifest aside: $BACKUP"
+      chown "$CONSOLE_USER" "$BACKUP" 2>/dev/null || true
+    else
+      echo "warning: could not move $USER_MANIFEST out of the way;"
+      echo "         it will shadow the system-wide manifest and break the extension."
+    fi
+  fi
+fi
+
 if [ -z "$HOME_DIR" ] || [ -z "$USER_UID" ]; then
   echo "could not resolve home/uid for $CONSOLE_USER; skipping LaunchAgent"
   exit 0

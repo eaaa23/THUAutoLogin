@@ -85,6 +85,29 @@ sudo "/Library/Application Support/THUAutoLogin/uninstall.sh"
 
 ---
 
+## 与开发安装（MacOS/install.sh）的冲突
+
+`postinstall` 会做一件容易被忽略但很关键的事：**把用户级目录下同名的原生消息清单改名备份**。
+
+原因是两者共用同一个主机名 `com.thu.autologin.host`，但扩展路径不同（因而扩展 ID 不同），清单位置也不同：
+
+| 安装方式 | 清单位置 | 扩展路径 |
+|---|---|---|
+| 本 `.pkg` | `/Library/Google/Chrome/NativeMessagingHosts/`（系统级） | `/Library/Application Support/THUAutoLogin/extension` |
+| `MacOS/install.sh` | `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/`（用户级） | 仓库里的 `THUAutoLogin/` |
+
+Chrome **优先读取用户级清单**，所以如果机器上留着旧的开发安装，它会把系统级清单整个遮蔽掉，而两者扩展 ID 不同，浏览器就会报：
+
+```
+Access to the specified native messaging host is forbidden
+```
+
+`postinstall` 的备份动作会把这个隐患清掉（备份文件名形如 `com.thu.autologin.host.json.pre-pkg-20260921163000.bak`）。安装日志在 `/var/log/thu-autologin-install.log`。
+
+反过来，`MacOS/install.sh` 检测到系统级安装时会拒绝继续并提示二选一，避免重新制造这个冲突。
+
+---
+
 ## 关于签名（要分发给别人时务必看）
 
 ### 代码签名
