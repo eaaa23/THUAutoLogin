@@ -124,17 +124,23 @@ def run_gui() -> int:
 
             path_row = ttk.Frame(frame)
             path_row.pack(fill="x", pady=(10, 4))
-            ttk.Entry(path_row, textvariable=tk.StringVar(value=self.ext_dir),
-                      state="readonly").pack(side="left", fill="x", expand=True)
+            # The StringVar must be kept on self. An anonymous one gets garbage
+            # collected, and StringVar.__del__ unsets the underlying Tcl
+            # variable, which silently blanks the Entry.
+            self.path_var = tk.StringVar(value=self.ext_dir)
+            self.path_entry = ttk.Entry(path_row, textvariable=self.path_var, state="readonly")
+            self.path_entry.pack(side="left", fill="x", expand=True)
 
             buttons = ttk.Frame(frame)
             buttons.pack(fill="x", pady=(2, 8))
             ttk.Button(buttons, text="打开扩展文件夹",
                        command=lambda: os.startfile(self.ext_dir)).pack(side="left")
+            ttk.Button(buttons, text="复制路径",
+                       command=lambda: self._copy(self.ext_dir, "扩展路径")).pack(side="left", padx=6)
             ttk.Button(buttons, text=f"复制 {CHROME_URL}",
-                       command=lambda: self._copy(CHROME_URL, CHROME_URL)).pack(side="left", padx=6)
+                       command=lambda: self._copy(CHROME_URL, CHROME_URL)).pack(side="left")
             ttk.Button(buttons, text=f"复制 {EDGE_URL}",
-                       command=lambda: self._copy(EDGE_URL, EDGE_URL)).pack(side="left")
+                       command=lambda: self._copy(EDGE_URL, EDGE_URL)).pack(side="left", padx=6)
 
             self._labelled(
                 frame,
