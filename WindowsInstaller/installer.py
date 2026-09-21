@@ -1,510 +1,421 @@
 #!/usr/bin/env python3
-"""THU Auto Login — Windows all-in-one installer.
+"""THU Auto Login — Windows installer (graphical).
 
-This file is frozen by PyInstaller into a single ``THUAutoLogin-Setup.exe`` that
-carries:
+Frozen by PyInstaller into a single ``THUAutoLogin-Setup.exe`` that carries the
+compiled native host and the Chrome extension. The target machine needs no
+Python, no pywin32 and no compiler.
 
-  * ``thu-autologin-host.exe``  — the native messaging host, itself a frozen
-    PyInstaller build, so the target machine needs **no Python and no pywin32**
-  * ``extension/``              — the Chrome extension, ready to load unpacked
+The wizard exists to fix the recurring "wrong extension id in
+com.thu.autologin.host.json" problem. The extension ID is never guessed: the
+user loads the extension first, and the installer then reads the ID straight out
+of the browser's own configuration (with manual entry as a fallback). See
+``installer_core`` for the two-phase install that makes this ordering possible.
 
-Running it installs everything per-user (no administrator rights required):
+  Step 1  load the extension   — extract it, show the folder, wait
+  Step 2  confirm the ID       — auto-read from Chrome/Edge, or type it
+  Step 3  done                 — summary and next steps
 
-  %LOCALAPPDATA%\\THUAutoLogin\\thu-autologin-host.exe     the host
-  %LOCALAPPDATA%\\THUAutoLogin\\extension\\                the extension
-  %LOCALAPPDATA%\\THUAutoLogin\\com.thu.autologin.host.json
-  HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\<host>
-  HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\THUAutoLogin
+Command line (used by the "Apps & features" entry and for automation):
 
-Run the same exe with ``--uninstall`` to remove everything again.
-
-Why there is no ``.cmd`` launcher any more: the older, script-based install had
-to point Chrome's manifest at a ``.cmd`` that re-invoked ``python.exe``, which
-meant the target machine needed Python and the launcher had to pin an
-interpreter path. Shipping a compiled host removes both problems.
+  THUAutoLogin-Setup.exe                      graphical install
+  THUAutoLogin-Setup.exe --silent             unattended install
+  THUAutoLogin-Setup.exe --uninstall          graphical uninstall
+  THUAutoLogin-Setup.exe --uninstall --silent unattended uninstall
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
 import os
-import shutil
-import subprocess
 import sys
 
-VERSION = "1.0.0"
-HOST_NAME = "com.thu.autologin.host"
-UNINSTALL_KEY = "THUAutoLogin"
-DISPLAY_NAME = "THU Auto Login"
+import installer_core as core
 
-APPDATA_DIR = os.path.join(
-    os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "THUAutoLogin"
-)
-HOST_EXE_NAME = "thu-autologin-host.exe"
-MANIFEST_NAME = f"{HOST_NAME}.json"
-EXT_DIR_NAME = "extension"
-SETUP_EXE_NAME = "THUAutoLogin-Setup.exe"
-
-NM_REGISTRY_SUBKEY = rf"Software\Google\Chrome\NativeMessagingHosts\{HOST_NAME}"
-UNINSTALL_SUBKEY = rf"Software\Microsoft\Windows\CurrentVersion\Uninstall\{UNINSTALL_KEY}"
-
-# Manifest::LOCATION_UNPACKED in Chrome's preferences.
-LOCATION_UNPACKED = 4
+CHROME_URL = "chrome://extensions"
+EDGE_URL = "edge://extensions"
 
 
 # ---------------------------------------------------------------------------
-# Console helpers
+# Graphical installer
 # ---------------------------------------------------------------------------
 
 
-def _is_windows() -> bool:
-    """Platform seam. Isolated in one function so the installer can be driven
-    end-to-end by tests on a non-Windows machine."""
-    return os.name == "nt"
+def build_gui():
+    """Import tkinter lazily so the module stays importable without a display."""
+    import tkinter as tk
+    from tkinter import ttk
+
+    return tk, ttk
 
 
-def say(message: str = "") -> None:
-    print(message, flush=True)
+def run_gui() -> int:
+    tk, ttk = build_gui()
+    from tkinter import messagebox
 
+    class InstallerApp(tk.Tk):
+        def __init__(self):
+            super().__init__()
+            self.title(f"THU Auto Login {core.VERSION} 安装程序")
+            self.resizable(False, False)
+            # Windows ships this font; Tk substitutes a sane default elsewhere.
+            self.option_add("*Font", "{Microsoft YaHei UI} 9")
 
-def die(message: str) -> None:
-    print(f"\n错误: {message}", file=sys.stderr, flush=True)
-    sys.exit(1)
+            self.ext_dir = ""
+            self.install_result = None
+            self.ping_result = None
 
+            self._prepare_payload()
+            self._build_widgets()
+            self._center(700, 500)
+            self.show_step(0)
 
-def pause_if_interactive() -> None:
-    """Keep the console window open when double-clicked from Explorer."""
-    if os.environ.get("THU_AUTOLOGIN_NO_PAUSE") == "1":
-        return
-    try:
-        input("\n按回车键关闭…")
-    except (EOFError, KeyboardInterrupt):
-        pass
+        # -- helpers -------------------------------------------------------
 
+        def _center(self, width, height):
+            self.update_idletasks()
+            x = max(0, (self.winfo_screenwidth() - width) // 2)
+            y = max(0, (self.winfo_screenheight() - height) // 3)
+            self.geometry(f"{width}x{height}+{x}+{y}")
 
-# ---------------------------------------------------------------------------
-# Locating the bundled payload
-# ---------------------------------------------------------------------------
-
-
-def bundle_root() -> str:
-    """Directory holding the bundled payload.
-
-    Under PyInstaller onefile this is the temporary extraction directory; when
-    running straight from the source tree it is the script's own directory.
-    """
-    return getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-
-
-def locate_payload():
-    """Return (host_exe, extension_dir).
-
-    The source-tree fallbacks let the installer be exercised without building
-    the frozen exe first, which is how it is smoke-tested.
-    """
-    root = bundle_root()
-    here = os.path.dirname(os.path.abspath(__file__))
-    repo = os.path.normpath(os.path.join(here, ".."))
-
-    host_candidates = [
-        os.path.join(root, HOST_EXE_NAME),
-        os.path.join(here, "build", HOST_EXE_NAME),
-        os.path.join(here, "dist", HOST_EXE_NAME),
-    ]
-    ext_candidates = [
-        os.path.join(root, EXT_DIR_NAME),
-        os.path.join(repo, "THUAutoLogin"),
-    ]
-
-    host_exe = next((p for p in host_candidates if os.path.isfile(p)), None)
-    ext_dir = next((p for p in ext_candidates if os.path.isdir(p)), None)
-    return host_exe, ext_dir
-
-
-# ---------------------------------------------------------------------------
-# Extension ID
-# ---------------------------------------------------------------------------
-
-
-def id_from_bytes(path_bytes: bytes) -> str:
-    """Chrome's unpacked-extension ID: first 32 hex digits of the SHA-256 of the
-    absolute path, with 0-9a-f mapped onto a-p."""
-    digest = hashlib.sha256(path_bytes).hexdigest()[:32]
-    return "".join(chr(ord("a") + int(char, 16)) for char in digest)
-
-
-def extension_id_candidates(ext_dir: str):
-    """Every plausible ID for `ext_dir`, best guess first.
-
-    Chrome computes the ID from the extension's absolute path, but for a path
-    with non-ASCII characters the documentation does not say which byte encoding
-    it hashes. Rather than guess, emit one ID per plausible encoding and allow
-    them all — they all name the same folder, so this widens nothing meaningful.
-    On an all-ASCII path (the common case) the encodings are byte-identical and
-    this collapses to exactly one ID.
-
-    UTF-16 is deliberately absent: Chromium hashes the UTF-8 wide-to-narrow
-    conversion, so including UTF-16 would add a bogus origin to every install.
-    """
-    absolute = os.path.abspath(ext_dir)
-    seen, ids = set(), []
-    for encoding in ("utf-8", "mbcs"):
-        try:
-            data = absolute.encode(encoding)
-        except (LookupError, UnicodeEncodeError):
-            continue
-        if data in seen:
-            continue
-        seen.add(data)
-        ids.append(id_from_bytes(data))
-    return ids
-
-
-def detect_extension_id(ext_dir: str):
-    """Read the authoritative ID out of Chrome's own preferences, if the
-    extension has already been loaded there."""
-    user_data = os.path.join(
-        os.environ.get("LOCALAPPDATA", ""), "Google", "Chrome", "User Data"
-    )
-    if not os.path.isdir(user_data):
-        return None
-
-    target = os.path.normcase(os.path.normpath(os.path.abspath(ext_dir)))
-    for profile in sorted(os.listdir(user_data)):
-        profile_dir = os.path.join(user_data, profile)
-        if not os.path.isdir(profile_dir):
-            continue
-        for filename in ("Secure Preferences", "Preferences"):
-            path = os.path.join(profile_dir, filename)
-            if not os.path.isfile(path):
-                continue
+        def _prepare_payload(self):
+            """Phase A: the extension must be on disk before it can be loaded."""
             try:
-                with open(path, "r", encoding="utf-8") as handle:
-                    data = json.load(handle)
-            except Exception:
-                continue
-            settings = (data.get("extensions") or {}).get("settings") or {}
-            for extension_id, entry in settings.items():
-                if not isinstance(entry, dict) or entry.get("location") != LOCATION_UNPACKED:
-                    continue
-                recorded = entry.get("path") or ""
-                if not recorded:
-                    continue
-                candidate = recorded if os.path.isabs(recorded) else os.path.join(profile_dir, recorded)
-                if os.path.normcase(os.path.normpath(candidate)) == target:
-                    return extension_id
-    return None
+                self.ext_dir = core.extract_extension()
+            except core.InstallError as exc:
+                messagebox.showerror("无法解压扩展", str(exc))
+                raise SystemExit(1)
 
+        def _copy(self, text, label):
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            self.status_var.set(f"已复制 {label}，请粘贴到浏览器地址栏")
 
-# ---------------------------------------------------------------------------
-# Registry
-# ---------------------------------------------------------------------------
+        def _labelled(self, parent, text, wraplength=650, **kw):
+            return ttk.Label(parent, text=text, wraplength=wraplength, justify="left", **kw)
 
+        # -- layout --------------------------------------------------------
 
-def register_native_host(manifest_path: str) -> None:
-    import winreg
+        def _build_widgets(self):
+            self.step_var = tk.StringVar()
+            ttk.Label(self, textvariable=self.step_var, font=("", 14, "bold")).pack(
+                anchor="w", padx=16, pady=(14, 0)
+            )
 
-    key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, NM_REGISTRY_SUBKEY, 0, winreg.KEY_WRITE)
-    try:
-        winreg.SetValueEx(key, None, 0, winreg.REG_SZ, manifest_path)
-    finally:
-        winreg.CloseKey(key)
+            self.status_var = tk.StringVar(value="")
+            self.body = ttk.Frame(self)
+            self.body.pack(fill="both", expand=True, padx=16, pady=10)
 
+            self.frames = [self._build_step1(), self._build_step2(), self._build_step3()]
 
-def unregister_native_host() -> bool:
-    import winreg
+            ttk.Label(self, textvariable=self.status_var, foreground="#555").pack(
+                anchor="w", padx=16, pady=(0, 12)
+            )
 
-    try:
-        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, NM_REGISTRY_SUBKEY)
-        return True
-    except FileNotFoundError:
-        return False
-    except OSError as exc:
-        print(f"  警告: 无法删除原生主机注册表项: {exc}", file=sys.stderr)
-        return False
+        def _build_step1(self):
+            frame = ttk.Frame(self.body)
 
+            self._labelled(
+                frame,
+                "请先在浏览器里加载扩展，然后回到本窗口继续。\n\n"
+                "1. 在浏览器地址栏打开  chrome://extensions  （Edge 用 edge://extensions）\n"
+                "2. 打开右上角的“开发者模式”\n"
+                "3. 点击“加载已解压的扩展程序”，选择下面这个文件夹：",
+            ).pack(anchor="w")
 
-def register_uninstall_entry(uninstall_exe: str) -> None:
-    import winreg
+            path_row = ttk.Frame(frame)
+            path_row.pack(fill="x", pady=(10, 4))
+            ttk.Entry(path_row, textvariable=tk.StringVar(value=self.ext_dir),
+                      state="readonly").pack(side="left", fill="x", expand=True)
 
-    key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, UNINSTALL_SUBKEY, 0, winreg.KEY_WRITE)
-    try:
-        values = {
-            "DisplayName": DISPLAY_NAME,
-            "DisplayVersion": VERSION,
-            "Publisher": "THU Auto Login",
-            "InstallLocation": APPDATA_DIR,
-            "UninstallString": f'"{uninstall_exe}" --uninstall',
-            "QuietUninstallString": f'"{uninstall_exe}" --uninstall --silent',
-            "NoModify": 1,
-            "NoRepair": 1,
-        }
-        for name, value in values.items():
-            kind = winreg.REG_DWORD if isinstance(value, int) else winreg.REG_SZ
-            winreg.SetValueEx(key, name, 0, kind, value)
-    finally:
-        winreg.CloseKey(key)
+            buttons = ttk.Frame(frame)
+            buttons.pack(fill="x", pady=(2, 8))
+            ttk.Button(buttons, text="打开扩展文件夹",
+                       command=lambda: os.startfile(self.ext_dir)).pack(side="left")
+            ttk.Button(buttons, text=f"复制 {CHROME_URL}",
+                       command=lambda: self._copy(CHROME_URL, CHROME_URL)).pack(side="left", padx=6)
+            ttk.Button(buttons, text=f"复制 {EDGE_URL}",
+                       command=lambda: self._copy(EDGE_URL, EDGE_URL)).pack(side="left")
 
+            self._labelled(
+                frame,
+                "也可以直接把上面这个文件夹拖到扩展管理页面上。\n\n"
+                "加载完成后点击“下一步”——安装程序会从浏览器配置里读取扩展 ID，"
+                "这样就不需要手动猜了。",
+                foreground="#555",
+            ).pack(anchor="w", pady=(6, 0))
 
-def unregister_uninstall_entry() -> bool:
-    import winreg
+            nav = ttk.Frame(frame)
+            nav.pack(side="bottom", fill="x", pady=(18, 0))
+            ttk.Button(nav, text="退出", command=self.destroy).pack(side="left")
+            ttk.Button(nav, text="下一步 →", command=lambda: self.show_step(1)).pack(side="right")
+            return frame
 
-    try:
-        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, UNINSTALL_SUBKEY)
-        return True
-    except FileNotFoundError:
-        return False
-    except OSError as exc:
-        print(f"  警告: 无法删除卸载项: {exc}", file=sys.stderr)
-        return False
+        def _build_step2(self):
+            frame = ttk.Frame(self.body)
 
+            self._labelled(
+                frame, "扩展 ID 决定浏览器能否调用原生主机，写错就会安装失败。请用下面任一方式获取："
+            ).pack(anchor="w")
 
-# ---------------------------------------------------------------------------
-# Install / uninstall
-# ---------------------------------------------------------------------------
+            self._labelled(
+                frame,
+                "· 点击“读取浏览器配置”自动获取（推荐，最准确——ID 由浏览器自己算出）\n"
+                "· 或者从 chrome://extensions 的扩展卡片上复制 ID，粘贴到下面输入框",
+                foreground="#555",
+            ).pack(anchor="w", pady=(2, 10))
 
+            row = ttk.Frame(frame)
+            row.pack(fill="x")
+            self.id_var = tk.StringVar()
+            self.id_var.trace_add("write", self._on_id_changed)
+            ttk.Entry(row, textvariable=self.id_var, font=("Consolas", 10)).pack(
+                side="left", fill="x", expand=True
+            )
+            self.read_btn = ttk.Button(row, text="读取浏览器配置", command=self._auto_detect)
+            self.read_btn.pack(side="left", padx=(6, 0))
 
-def write_manifest(manifest_path: str, host_exe: str, allowed_ids) -> None:
-    manifest = {
-        "name": HOST_NAME,
-        "description": "THU Auto Login native messaging host",
-        "path": host_exe,
-        "type": "stdio",
-        "allowed_origins": [f"chrome-extension://{i}/" for i in allowed_ids],
-    }
-    with open(manifest_path, "w", encoding="utf-8") as handle:
-        json.dump(manifest, handle, indent=2)
-        handle.write("\n")
+            self.id_status_var = tk.StringVar(value="")
+            self.id_status = ttk.Label(frame, textvariable=self.id_status_var,
+                                       wraplength=650, justify="left")
+            self.id_status.pack(anchor="w", pady=(8, 0))
 
+            self.detect_detail_var = tk.StringVar(value="")
+            ttk.Label(frame, textvariable=self.detect_detail_var, foreground="#555",
+                      wraplength=650, justify="left").pack(anchor="w", pady=(6, 0))
 
-def self_copy_target() -> str:
-    """Where to park a copy of this installer so it can serve as the uninstaller."""
-    return os.path.join(APPDATA_DIR, SETUP_EXE_NAME)
+            nav = ttk.Frame(frame)
+            nav.pack(side="bottom", fill="x", pady=(18, 0))
+            ttk.Button(nav, text="← 上一步", command=lambda: self.show_step(0)).pack(side="left")
+            self.install_btn = ttk.Button(nav, text="安装", command=self._do_install)
+            self.install_btn.pack(side="right")
+            self.install_btn.state(["disabled"])
+            return frame
 
+        def _build_step3(self):
+            frame = ttk.Frame(self.body)
+            self.done_var = tk.StringVar(value="")
+            ttk.Label(frame, textvariable=self.done_var, wraplength=650,
+                      justify="left").pack(anchor="w")
 
-def copy_self_as_uninstaller() -> str:
-    """Copy the running exe into the install directory.
+            nav = ttk.Frame(frame)
+            nav.pack(side="bottom", fill="x", pady=(18, 0))
+            ttk.Button(nav, text="完成", command=self.destroy).pack(side="right")
+            return frame
 
-    When frozen, ``sys.executable`` is the setup exe itself. When running from
-    source there is nothing to copy, so the caller falls back to removing files
-    directly and the uninstall registry entry is skipped.
-    """
-    target = self_copy_target()
-    if not getattr(sys, "frozen", False):
-        return ""
-    try:
-        if os.path.abspath(sys.executable) == os.path.abspath(target):
-            return target  # already running from the install dir
-        os.makedirs(APPDATA_DIR, exist_ok=True)
-        shutil.copyfile(sys.executable, target)
-        return target
-    except Exception as exc:
-        print(f"  警告: 无法复制卸载程序: {exc}", file=sys.stderr)
-        return ""
+        # -- behaviour -----------------------------------------------------
 
+        def show_step(self, index):
+            titles = [
+                "步骤 1 / 3 — 加载浏览器扩展",
+                "步骤 2 / 3 — 确认扩展 ID",
+                "安装完成",
+            ]
+            self.step_var.set(titles[index])
+            for i, frame in enumerate(self.frames):
+                frame.pack_forget()
+                if i == index:
+                    frame.pack(fill="both", expand=True)
+            self.status_var.set("")
+            if index == 1:
+                self._auto_detect(announce=False)
 
-def do_install(silent: bool = False) -> int:
-    if not _is_windows():
-        die("此安装程序仅适用于 Windows")
-
-    say(f"THU Auto Login {VERSION} 安装程序")
-    say("=" * 60)
-
-    host_exe_src, ext_src = locate_payload()
-    if not host_exe_src:
-        die("安装包内缺少 thu-autologin-host.exe（构建不完整）")
-    if not ext_src:
-        die("安装包内缺少 extension 目录（构建不完整）")
-
-    say(f"  原生主机 : {host_exe_src}")
-    say(f"  扩展     : {ext_src}")
-    say("")
-
-    # -- payload ------------------------------------------------------------
-    say("==> 复制文件")
-    os.makedirs(APPDATA_DIR, exist_ok=True)
-
-    host_exe_dst = os.path.join(APPDATA_DIR, HOST_EXE_NAME)
-    ext_dst = os.path.join(APPDATA_DIR, EXT_DIR_NAME)
-    manifest_dst = os.path.join(APPDATA_DIR, MANIFEST_NAME)
-
-    shutil.copyfile(host_exe_src, host_exe_dst)
-    say(f"    {host_exe_dst}")
-
-    if os.path.isdir(ext_dst):
-        shutil.rmtree(ext_dst, ignore_errors=True)
-    shutil.copytree(ext_src, ext_dst)
-    say(f"    {ext_dst}")
-
-    # -- extension id -------------------------------------------------------
-    say("")
-    say("==> 计算扩展 ID")
-    detected = detect_extension_id(ext_dst)
-    if detected:
-        allowed_ids = [detected]
-        say(f"    {detected}  [从 Chrome 配置读取]")
-    else:
-        allowed_ids = extension_id_candidates(ext_dst)
-        say(f"    {allowed_ids[0]}  [由安装路径推导]")
-        if len(allowed_ids) > 1:
-            say(f"    同时允许 {len(allowed_ids)} 种路径编码变体（同一目录）")
-
-    # -- manifest + registry ------------------------------------------------
-    say("")
-    say("==> 注册到 Chrome（HKCU，无需管理员权限）")
-    write_manifest(manifest_dst, host_exe_dst, allowed_ids)
-    say(f"    清单 : {manifest_dst}")
-    try:
-        register_native_host(manifest_dst)
-        say(f"    注册表: HKCU\\{NM_REGISTRY_SUBKEY}")
-    except Exception as exc:
-        die(f"写入注册表失败: {exc}")
-
-    # -- uninstaller --------------------------------------------------------
-    uninstall_exe = copy_self_as_uninstaller()
-    if uninstall_exe:
-        try:
-            register_uninstall_entry(uninstall_exe)
-            say(f"    卸载 : 已注册到“应用和功能”（{uninstall_exe}）")
-        except Exception as exc:
-            print(f"  警告: 无法注册卸载项: {exc}", file=sys.stderr)
-
-    # -- self test ----------------------------------------------------------
-    say("")
-    say("==> 自检")
-    try:
-        result = subprocess.run(
-            [host_exe_dst, "--ping"], capture_output=True, text=True, timeout=60
-        )
-        payload = json.loads(result.stdout or "{}")
-        if payload.get("pywin32") is False:
-            say(f"    警告: 主机缺少 pywin32: {payload.get('detail')}")
-        browser = payload.get("browser")
-        if browser:
-            say(f"    找到浏览器窗口 hwnd={browser.get('hwnd')} pid={browser.get('pid')} "
-                f"前台={browser.get('foreground')}")
-        else:
-            say("    暂未找到浏览器窗口（Chrome 没在运行也可以稍后再试）")
-    except Exception as exc:
-        print(f"    自检未能完成: {exc}", file=sys.stderr)
-
-    # -- next steps ---------------------------------------------------------
-    say("")
-    say("=" * 60)
-    say("安装完成 —— 还需两步")
-    say("")
-    say("1. 载入 Chrome 扩展")
-    say("   打开 chrome://extensions → 右上角开启“开发者模式”")
-    say("   → “加载已解压的扩展程序” → 选择：")
-    say(f"     {ext_dst}")
-    say("   （也可以把该文件夹直接拖到 chrome://extensions 页面上）")
-    say("")
-    say("2. 重启 Chrome")
-    say("   让它重新读取原生消息主机注册表。")
-    say("")
-    say("完成。打开 id.tsinghua.edu.cn 登录页并保持 Chrome 在前台即可。")
-    say("")
-    say("卸载：设置 → 应用 → 已安装的应用 → THU Auto Login")
-    say(f"      或运行 \"{self_copy_target()}\" --uninstall")
-    say("=" * 60)
-
-    if not silent:
-        try:
-            os.startfile(ext_dst)  # noqa: S606 - Windows-only convenience
-        except Exception:
-            pass
-
-    return 0
-
-
-def do_uninstall(silent: bool = False) -> int:
-    if not _is_windows():
-        die("此卸载程序仅适用于 Windows")
-
-    say(f"正在卸载 {DISPLAY_NAME}…")
-    say("")
-
-    say("==> 删除注册表项")
-    if unregister_native_host():
-        say(f"    已删除 HKCU\\{NM_REGISTRY_SUBKEY}")
-    else:
-        say("    原生主机注册表项不存在，跳过")
-
-    if unregister_uninstall_entry():
-        say("    已删除“应用和功能”条目")
-
-    say("")
-    say("==> 删除文件")
-    # Remove everything except the running uninstaller, which Windows will not
-    # let us delete while it is executing; it is removed on a best-effort basis
-    # and the leftover is harmless (and gets overwritten on reinstall).
-    keep = os.path.abspath(sys.executable) if getattr(sys, "frozen", False) else ""
-    for name in (HOST_EXE_NAME, MANIFEST_NAME):
-        path = os.path.join(APPDATA_DIR, name)
-        try:
-            os.remove(path)
-            say(f"    已删除 {path}")
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            print(f"    警告: 无法删除 {path}: {exc}", file=sys.stderr)
-
-    ext_dst = os.path.join(APPDATA_DIR, EXT_DIR_NAME)
-    if os.path.isdir(ext_dst):
-        shutil.rmtree(ext_dst, ignore_errors=True)
-        say(f"    已删除 {ext_dst}")
-
-    if os.path.isdir(APPDATA_DIR):
-        leftovers = []
-        for entry in os.listdir(APPDATA_DIR):
-            full = os.path.join(APPDATA_DIR, entry)
-            if keep and os.path.abspath(full) == keep:
-                leftovers.append(entry)
-                continue
-            try:
-                if os.path.isdir(full):
-                    shutil.rmtree(full, ignore_errors=True)
+        def _on_id_changed(self, *_args):
+            text = self.id_var.get().strip()
+            if core.normalize_extension_id(text):
+                self.install_btn.state(["!disabled"])
+                self.id_status_var.set("ID 格式有效，可以安装。")
+                self.id_status.configure(foreground="#0a7d28")
+            else:
+                self.install_btn.state(["disabled"])
+                if text:
+                    self.id_status_var.set("ID 格式不正确：应为 32 位、只含 a-p 的字符。")
+                    self.id_status.configure(foreground="#b00020")
                 else:
-                    os.remove(full)
-                say(f"    已删除 {full}")
-            except OSError as exc:
-                print(f"    警告: 无法删除 {full}: {exc}", file=sys.stderr)
-                leftovers.append(entry)
-        if not leftovers:
-            try:
-                os.rmdir(APPDATA_DIR)
-                say(f"    已删除空目录 {APPDATA_DIR}")
-            except OSError:
-                pass
+                    self.id_status_var.set("")
+                    self.id_status.configure(foreground="#555")
 
-    say("")
-    say("=" * 60)
-    say("卸载完成。还需手动做一件事：")
-    say("")
-    say("  在 chrome://extensions 里移除 THU Auto Login 扩展。")
-    say("")
-    say("建议随后重启 Chrome。")
-    say("=" * 60)
+        def _auto_detect(self, announce=True):
+            matches = core.detect_extension_ids(self.ext_dir)
+            if matches:
+                self.id_var.set(matches[0].extension_id)
+                where = "、".join(m.describe() for m in matches)
+                self.detect_detail_var.set(
+                    f"已从浏览器配置读取到扩展 ID（{where}）。"
+                    + ("\n多个位置读到同一个 ID，说明加载正确。" if len(matches) > 1 else "")
+                )
+                self.status_var.set("已自动读取扩展 ID")
+            else:
+                self.detect_detail_var.set(
+                    "未在 Chrome / Edge 的配置里找到这个扩展。\n"
+                    "请确认：已经在浏览器里加载了上面那个文件夹，并且加载后浏览器一直开着。\n"
+                    "仍然读不到时，可以在 chrome://extensions 打开扩展的“详细信息”，"
+                    "复制其中的 ID，粘贴到上面的输入框。"
+                )
+                if announce:
+                    self.status_var.set("未找到扩展，请手动填写，或重新加载后再点一次")
+
+        def _do_install(self):
+            extension_id = core.normalize_extension_id(self.id_var.get())
+            if not extension_id:
+                return
+
+            self.install_btn.state(["disabled"])
+            self.read_btn.state(["disabled"])
+            self.status_var.set("正在安装…")
+            self.update_idletasks()
+
+            try:
+                self.install_result = core.install_host([extension_id])
+            except Exception as exc:  # noqa: BLE001 - surface anything to the user
+                messagebox.showerror("安装失败", f"{type(exc).__name__}: {exc}")
+                self.install_btn.state(["!disabled"])
+                self.read_btn.state(["!disabled"])
+                self.status_var.set("安装失败")
+                return
+
+            self.status_var.set("正在自检…")
+            self.update_idletasks()
+            self.ping_result = core.verify_host()
+
+            self._render_done(extension_id)
+            self.show_step(2)
+
+        def _render_done(self, extension_id):
+            browser = (self.ping_result or {}).get("browser") or {}
+            if browser:
+                probe = (
+                    "自检找到浏览器窗口："
+                    f"{browser.get('name') or browser.get('process') or 'Chromium'}"
+                    f"（前台={browser.get('foreground')}）"
+                )
+            else:
+                probe = "自检时没找到浏览器窗口（浏览器没开着也没关系，之后打开即可）。"
+
+            self.done_var.set(
+                "安装成功。\n\n"
+                f"写入的扩展 ID：\n    {extension_id}\n\n"
+                f"原生主机：\n    {os.path.join(core.APPDATA_DIR, core.HOST_EXE_NAME)}\n\n"
+                f"原生消息清单：\n    {os.path.join(core.APPDATA_DIR, core.MANIFEST_NAME)}\n\n"
+                f"{probe}\n\n"
+                "最后一步：重启浏览器，让它重新读取原生消息主机。\n\n"
+                f"卸载：设置 → 应用 → 已安装的应用 → {core.DISPLAY_NAME}"
+            )
+
+    app = InstallerApp()
+    app.mainloop()
     return 0
+
+
+# ---------------------------------------------------------------------------
+# Uninstall
+# ---------------------------------------------------------------------------
+
+
+def run_uninstall_gui() -> int:
+    _tk, _ttk = build_gui()
+    import tkinter as tk
+    from tkinter import messagebox
+
+    root = tk.Tk()
+    root.withdraw()
+
+    if not messagebox.askyesno(
+        "卸载 THU Auto Login",
+        "确定要卸载吗？\n\n"
+        "会删除原生主机、原生消息清单、扩展文件和注册表项。\n"
+        "浏览器里已加载的扩展需要在扩展管理页手动移除。",
+    ):
+        return 0
+
+    try:
+        core.uninstall()
+    except Exception as exc:  # noqa: BLE001
+        messagebox.showerror("卸载失败", f"{type(exc).__name__}: {exc}")
+        return 1
+
+    messagebox.showinfo(
+        "卸载完成",
+        "已删除原生主机和相关文件。\n\n"
+        "还剩一件事需要手动做：\n"
+        "在 chrome://extensions 里移除 THU Auto Login 扩展。\n\n"
+        "建议随后重启浏览器。",
+    )
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Unattended install
+# ---------------------------------------------------------------------------
+
+
+def run_silent(extension_id=None) -> int:
+    """No GUI. Prefers the browser configuration, falling back to path-derived
+    IDs only when the extension has not been loaded yet."""
+    try:
+        ext_dir = core.extract_extension()
+    except core.InstallError as exc:
+        core.say(f"error: {exc}")
+        return 1
+
+    if extension_id:
+        resolved = core.normalize_extension_id(extension_id)
+        if not resolved:
+            core.say(f"error: 扩展 ID 格式不正确: {extension_id}")
+            return 1
+        ids = [resolved]
+        core.say(f"使用命令行指定的扩展 ID: {resolved}")
+    else:
+        matches = core.detect_extension_ids(ext_dir)
+        if matches:
+            ids = [matches[0].extension_id]
+            core.say(f"已从 {matches[0].describe()} 读取扩展 ID: {ids[0]}")
+        else:
+            ids = core.extension_id_candidates(ext_dir)
+            core.say("警告: 未在浏览器配置中找到该扩展，改用由安装路径推导的 ID。")
+            core.say("      请先加载扩展再重新运行，否则浏览器可能拒绝连接原生主机。")
+            core.say(f"      {ids[0]}")
+
+    try:
+        core.install_host(ids)
+    except core.InstallError as exc:
+        core.say(f"error: {exc}")
+        return 1
+
+    if extension_id is None:
+        core.say("")
+        core.say("请加载扩展：")
+        core.say(f"  {ext_dir}")
+    return 0
+
+
+def run_silent_uninstall() -> int:
+    try:
+        core.uninstall()
+    except core.InstallError as exc:
+        core.say(f"error: {exc}")
+        return 1
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        description=f"{DISPLAY_NAME} 安装程序", allow_abbrev=False
+        description=f"{core.DISPLAY_NAME} 安装程序", allow_abbrev=False
     )
     parser.add_argument("--uninstall", action="store_true", help="卸载")
-    parser.add_argument("--silent", action="store_true", help="不打开文件夹、不等待回车")
+    parser.add_argument("--silent", action="store_true", help="不显示图形界面")
+    parser.add_argument("--extension-id", default=None, help="直接指定扩展 ID（静默安装用）")
     args = parser.parse_args(argv)
 
-    try:
-        if args.uninstall:
-            return do_uninstall(silent=args.silent)
-        return do_install(silent=args.silent)
-    finally:
-        if not args.silent:
-            pause_if_interactive()
+    if args.uninstall:
+        return run_silent_uninstall() if args.silent else run_uninstall_gui()
+    if args.silent:
+        return run_silent(args.extension_id)
+    return run_gui()
 
 
 if __name__ == "__main__":

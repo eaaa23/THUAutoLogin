@@ -78,13 +78,15 @@ def check_environment() -> None:
         die(f"缺少扩展目录: {EXT_SOURCE}")
 
 
-def run_pyinstaller(name: str, source: str, extra_args) -> str:
+def run_pyinstaller(name: str, source: str, extra_args, console: bool = True) -> str:
     args = [
         sys.executable, "-m", "PyInstaller",
         "--onefile",
-        # --console is mandatory: the host speaks the native messaging protocol
-        # over stdio. --noconsole would leave it with no usable stdin/stdout.
-        "--console",
+        # The host must be --console: it speaks the native messaging protocol over
+        # stdio, and --noconsole would leave it with no usable stdin/stdout.
+        # The installer is the opposite: a GUI build, so no console window flashes
+        # up when it is double-clicked.
+        "--console" if console else "--noconsole",
         "--noconfirm",
         "--clean",
         "--name", name,
@@ -131,9 +133,13 @@ def build_setup(host_exe: str) -> str:
     return run_pyinstaller(
         SETUP_EXE, INSTALLER_SOURCE,
         [
+            # installer.py imports installer_core, so the directory must be on
+            # the analysis path.
+            "--paths", HERE,
             "--add-data", f"{host_exe}{sep}.",
             "--add-data", f"{EXT_SOURCE}{sep}extension",
         ],
+        console=False,
     )
 
 

@@ -73,13 +73,25 @@ def detect_extension_id(extension_dir: str):
     More reliable than computing it: this is Chrome's own answer, so it needs no
     assumptions about path normalisation or encoding.
     """
-    user_data = os.path.join(
-        os.environ.get("LOCALAPPDATA", ""), "Google", "Chrome", "User Data"
-    )
+    target = os.path.normcase(os.path.normpath(os.path.abspath(extension_dir)))
+    base = os.environ.get("LOCALAPPDATA", "")
+
+    # Both browsers derive unpacked extension IDs the same way, so either can be
+    # used to discover the real one. The extension is expected to be loaded in
+    # whichever one the user actually runs.
+    for user_data in (
+        os.path.join(base, "Google", "Chrome", "User Data"),
+        os.path.join(base, "Microsoft", "Edge", "User Data"),
+    ):
+        found = _search_user_data(user_data, target)
+        if found:
+            return found
+    return None
+
+
+def _search_user_data(user_data: str, target: str):
     if not os.path.isdir(user_data):
         return None
-
-    target = os.path.normcase(os.path.normpath(os.path.abspath(extension_dir)))
 
     for profile in sorted(os.listdir(user_data)):
         profile_dir = os.path.join(user_data, profile)
