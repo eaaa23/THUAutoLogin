@@ -15,33 +15,68 @@
 
 ## 快速开始
 
-两端都是**用户级安装，不需要管理员权限**；扩展在 `THUAutoLogin/`，两端共享。
+两条路径，按用途选：
 
-### macOS
+| 用途 | 方式 | 需要什么 |
+|---|---|---|
+| 自己用 / 参与开发 | 直接用仓库里的脚本安装 | Xcode CLT（macOS）或 Python + pywin32（Windows） |
+| 发给没有开发环境的用户 | 构建**一体化安装器** | 构建机上备好工具链；**最终用户什么都不用装** |
+
+### 方式一：从仓库安装（开发用）
+
+**macOS**（需要 Xcode Command Line Tools，无需管理员权限）
 
 ```bash
 cd MacOS
-./build.sh      # 需要 Xcode Command Line Tools
-./install.sh    # 安装到用户目录，无需 sudo
+./build.sh
+./install.sh
 ```
 
-随后：**系统设置 → 隐私与安全性 → 辅助功能** 勾选 `THUAutoLoginKeyAgent`；在 `chrome://extensions` 重新加载扩展。详见 [`MacOS/README.md`](MacOS/README.md)。
-
-### Windows
+**Windows**（需要 Python + pywin32，无需管理员权限）
 
 ```powershell
 python -m pip install pywin32
 python Windows\native-host\install.py
 ```
 
-随后**重启 Chrome**，并在 `chrome://extensions` 确认扩展已加载。详见 [`Windows/README.md`](Windows/README.md)。
+### 方式二：构建一体化安装器（分发用）
+
+安装包内已含**编译好的**主机程序，最终用户无需 Xcode / 编译器 / Python。
+
+**macOS → `.pkg`（可再套 `.dmg`）**
+
+```bash
+cd MacInstaller
+./build-pkg.sh --dmg
+```
+
+产物 `THUAutoLogin-1.0.0.pkg` / `.dmg`，**系统级**安装（需要管理员密码）。详见 [`MacInstaller/README.md`](MacInstaller/README.md)。
+
+**Windows → 单文件 exe**（PyInstaller 无法交叉编译，必须在 Windows 上构建）
+
+```powershell
+python -m pip install pywin32 pyinstaller
+python WindowsInstaller\build.py
+```
+
+产物 `THUAutoLogin-Setup.exe`，**用户级**安装（无需管理员权限）。详见 [`WindowsInstaller/README.md`](WindowsInstaller/README.md)。
+
+### 装完都还有两步手动操作
+
+这两步**无法脚本化**，任何安装方式都一样：
+
+1. **授予权限**——仅 macOS 需要：系统设置 → 隐私与安全性 → 辅助功能 → 勾选 `THUAutoLoginKeyAgent`。
+   （Windows 没有这个机制，主机 exe 直接可用。）
+2. **加载扩展**——两端都需要：`chrome://extensions` → 开启开发者模式 → 加载已解压的扩展程序。
+   开发方式装的是仓库里的 `THUAutoLogin/`；安装器装的是各自的安装目录（安装器的完成页面会给出完整路径）。
 
 ### 扩展 ID 会因平台而异
 
-Chrome 用**未打包扩展目录绝对路径的 SHA-256** 推导扩展 ID，所以同一份扩展在 macOS 与 Windows 上的 ID **不同**，两端的安装脚本各自负责把它写进原生消息清单：
+Chrome 用**未打包扩展目录绝对路径的 SHA-256** 推导扩展 ID，所以同一份扩展在不同路径、不同平台上的 ID **不同**。三种安装方式各自把 ID 写进原生消息清单：
 
-- macOS `install.sh`：由路径计算；
-- Windows `install.py`：**直接读 Chrome 配置**取出 ID（更可靠），读不到才回退到计算。
+- `MacOS/install.sh`：由仓库路径计算；
+- `MacInstaller/build-pkg.sh`：由**固定的系统安装路径**计算，因此所有用户 ID 一致，清单可以在构建时就写死；
+- `WindowsInstaller/installer.py`：**优先读 Chrome 配置**里记录的 ID，读不到才由路径推导（非 ASCII 路径会把两种编码的 ID 都列上）。
 
 移动扩展目录会改变 ID，需要重跑对应的安装脚本。
 
@@ -55,18 +90,29 @@ AutoLogin/
 │   ├── manifest.json      nativeMessaging 权限；已移除 debugger
 │   ├── background.js      原生消息通道 + 解锁阶梯 + 调用 doLogin()
 │   └── content.js         页面规则 + 焦点把关
-├── MacOS/                 macOS 实现
+│
+├── MacOS/                 macOS 实现（开发用：直接编译 + 安装）
 │   ├── shared/            两个主机共用的 socket / 分帧工具
 │   ├── native-host/       主机①：native messaging host
 │   ├── key-agent/         主机②：菜单栏 App（持有辅助功能权限）
 │   ├── build.sh  install.sh  uninstall.sh
-│   └── README.md          详细的 macOS 文档
-└── Windows/               Windows 实现
-    ├── native-host/
-    │   ├── thu_autologin_host.py   唯一原生主机
-    │   ├── install.py  uninstall.py
-    │   └── requirements.txt
-    └── README.md          详细的 Windows 文档
+│   └── README.md
+├── Windows/               Windows 实现（开发用：直接运行 + 安装）
+│   ├── native-host/
+│   │   ├── thu_autologin_host.py   唯一原生主机
+│   │   ├── install.py  uninstall.py
+│   │   └── requirements.txt
+│   └── README.md
+│
+├── MacInstaller/          分发用：构建 .pkg / .dmg（内含编译好的主机）
+│   ├── build-pkg.sh  distribution.xml  launchagent.plist.in
+│   ├── scripts/postinstall  uninstall.sh
+│   ├── resources/        欢迎页 / 完成页 / DMG 说明
+│   └── README.md
+└── WindowsInstaller/      分发用：构建单文件 exe（内含编译好的主机）
+    ├── build.py           先构建主机 exe，再把它嵌进安装器
+    ├── installer.py       安装器本体（被冻结成单文件）
+    └── README.md
 ```
 
 ---
