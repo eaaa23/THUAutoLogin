@@ -1,0 +1,85 @@
+#!/bin/bash
+#
+# postinstall — runs as root after the payload has been placed.
+#
+# A system package cannot do per-user work, so this script:
+#   1. installs the LaunchAgent into the console user's ~/Library/LaunchAgents
+#      (substituting their home directory into the template)
+#   2. loads it into their GUI session
+#   3. launches the agent once, which is what makes macOS show the
+#      Accessibility permission prompt
+#
+# Everything here is best effort: a failure must not fail the installation,
+# because the app and manifest are already in place and the LaunchAgent would
+# also be picked up at next login.
+#
+# @@EXTENSION_ID@@ is replaced at build time.
+set -u
+
+LOG="/var/log/thu-autologin-install.log"
+exec >>"$LOG" 2>&1
+echo "=== $(date -u '+%Y-%m-%dT%H:%M:%SZ') THU Auto Login postinstall ==="
+
+AGENT_LABEL="com.thu.autologin.keyagent"
+SUPPORT_DIR="/Library/Application Support/THUAutoLogin"
+AGENT_APP="/Applications/THUAutoLoginKeyAgent.app"
+EXT_DIR="$SUPPORT_DIR/extension"
+PLIST_TEMPLATE="$SUPPORT_DIR/$AGENT_LABEL.plist"
+EXTENSION_ID="@@EXTENSION_ID@@"
+
+echo "extension id: $EXTENSION_ID"
+
+# The extension must be readable by every user who wants to load it.
+chmod -R a+rX "$EXT_DIR" 2>/dev/null || true
+
+CONSOLE_USER="$(stat -f '%Su' /dev/console 2>/dev/null || echo '')"
+
+if [ -z "$CONSOLE_USER" ] || [ "$CONSOLE_USER" = "root" ] || [ "$CONSOLE_USER" = "loginwindow" ]; then
+  echo "no GUI user logged in; skipping the per-user LaunchAgent."
+  echo "the agent will start at next login only if the LaunchAgent is installed;"
+  echo "tell the user to re-run: sudo installer -pkg <pkg> -target / while logged in."
+  exit 0
+fi
+
+HOME_DIR="$(dscl . -read "/Users/$CONSOLE_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+USER_UID="$(id -u "$CONSOLE_USER" 2>/dev/null || echo '')"
+
+if [ -z "$HOME_DIR" ] || [ -z "$USER_UID" ]; then
+  echo "could not resolve home/uid for $CONSOLE_USER; skipping LaunchAgent"
+  exit 0
+fi
+
+echo "console user: $CONSOLE_USER uid=$USER_UID home=$HOME_DIR"
+
+# The log directory must exist before launchd tries to open the log file;
+# launchd does not create it.
+mkdir -p "$HOME_DIR/Library/Logs/THUAutoLogin" 2>/dev/null || true
+chown -R "$CONSOLE_USER" "$HOME_DIR/Library/Logs/THUAutoLogin" 2>/dev/null || true
+
+LA_DIR="$HOME_DIR/Library/LaunchAgents"
+mkdir -p "$LA_DIR" 2>/dev/null || true
+
+if [ -f "$PLIST_TEMPLATE" ]; then
+  sed "s|@HOME@|$HOME_DIR|g" "$PLIST_TEMPLATE" > "$LA_DIR/$AGENT_LABEL.plist"
+  chown "$CONSOLE_USER" "$LA_DIR/$AGENT_LABEL.plist" 2>/dev/null || true
+  chmod 0644 "$LA_DIR/$AGENT_LABEL.plist"
+  # Remove the template: it only exists to be substituted, and leaving it in
+  # /Library with a literal @HOME@ in it would be confusing.
+  rm -f "$PLIST_TEMPLATE"
+  echo "installed $LA_DIR/$AGENT_LABEL.plist"
+else
+  echo "warning: $PLIST_TEMPLATE missing, cannot install the LaunchAgent"
+fi
+
+# (Re)load into the user's GUI domain.
+launchctl bootout "gui/$USER_UID/$AGENT_LABEL" 2>/dev/null || true
+if ! launchctl asuser "$USER_UID" launchctl bootstrap "gui/$USER_UID" "$LA_DIR/$AGENT_LABEL.plist" 2>/dev/null; then
+  echo "launchctl bootstrap failed; the agent will load at next login"
+fi
+
+# Launching the app once is what triggers the Accessibility prompt. Without it
+# the app only appears in System Settings after the user runs it manually.
+launchctl asuser "$USER_UID" open -a "$AGENT_APP" 2>/dev/null || true
+
+echo "postinstall done"
+exit 0

@@ -1,0 +1,48 @@
+THU Auto Login —— 安装说明
+================================
+
+双击 THUAutoLogin-1.0.0.pkg 开始安装，需要输入管理员密码。
+
+安装包内已包含编译好的程序，无需 Xcode、编译器或 Python。
+
+
+安装完成后还有两步手动操作
+--------------------------------
+
+1. 授予"辅助功能"权限
+
+   系统设置 → 隐私与安全性 → 辅助功能
+   勾选 THUAutoLoginKeyAgent
+
+   安装器会尝试自动弹出授权提示。授权后菜单栏会出现一个 THU 图标，
+   点它可以打开该设置页，也可以做自检。
+
+
+2. 载入 Chrome 扩展
+
+   打开 chrome://extensions
+   右上角开启"开发者模式"
+   点"加载已解压的扩展程序"，选择：
+
+     /Library/Application Support/THUAutoLogin/extension
+
+   提示：在文件选择窗口里按 ⌘⇧G，粘贴上面的路径后回车。
+   也可以把该文件夹直接拖到 chrome://extensions 页面上。
+
+
+验证
+--------------------------------
+
+菜单栏 THU 图标 → "自检（向 Chrome 发送一次 Tab）"。
+
+日志位于 ~/Library/Logs/THUAutoLogin/keyagent.log
+
+
+卸载
+--------------------------------
+
+  sudo "/Library/Application Support/THUAutoLogin/uninstall.sh"
+
+另需手动处理两处：
+  - 系统设置 → 隐私与安全性 → 辅助功能 里删除残留的 THUAutoLoginKeyAgent
+  - chrome://extensions 里移除已加载的扩展

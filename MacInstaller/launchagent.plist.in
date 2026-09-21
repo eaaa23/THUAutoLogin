@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent template shipped inside the installer payload.
+
+  A system package cannot know which user will run the key agent, so @HOME@ is
+  substituted with the console user's home directory by the postinstall script
+  before the file is moved into ~/Library/LaunchAgents/.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.thu.autologin.keyagent</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Applications/THUAutoLoginKeyAgent.app/Contents/MacOS/THUAutoLoginKeyAgent</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<!-- Restart on crash, but stay stopped after a deliberate Quit. -->
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<!-- Adaptive (not Interactive): let App Nap and timer coalescing apply while
+	     the agent is idle, otherwise it burns CPU doing nothing. -->
+	<key>ProcessType</key>
+	<string>Adaptive</string>
+	<key>StandardOutPath</key>
+	<string>@HOME@/Library/Logs/THUAutoLogin/keyagent.log</string>
+	<key>StandardErrorPath</key>
+	<string>@HOME@/Library/Logs/THUAutoLogin/keyagent.log</string>
+</dict>
+</plist>

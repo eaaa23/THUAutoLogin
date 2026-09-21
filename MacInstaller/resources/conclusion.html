@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  body { font-family: -apple-system, "PingFang SC", sans-serif; font-size: 13px; line-height: 1.6; margin: 0; }
+  h2 { font-size: 15px; margin: 0 0 8px; }
+  h3 { font-size: 13px; margin: 14px 0 4px; }
+  p { margin: 0 0 8px; }
+  code { font-family: Menlo, monospace; font-size: 12px; background: #f4f4f4; padding: 1px 4px; border-radius: 3px; }
+  .path { display: block; margin: 4px 0 8px; padding: 6px 8px; background: #f4f4f4; border-radius: 4px; word-break: break-all; }
+  ol { padding-left: 20px; margin: 0 0 8px; }
+  li { margin-bottom: 8px; }
+</style>
+</head>
+<body>
+<h2>安装完成 —— 还需两步</h2>
+
+<h3>1. 授予"辅助功能"权限</h3>
+<p>安装器已经替你打开了授权提示。若没看到，请手动前往：</p>
+<p><b>系统设置 → 隐私与安全性 → 辅助功能</b>，勾选 <b>THUAutoLoginKeyAgent</b>。</p>
+<p>之后菜单栏会出现一个 <b>THU</b> 图标，点它可以重新打开这个设置页，也可以做自检。</p>
+
+<h3>2. 载入 Chrome 扩展</h3>
+<ol>
+  <li>打开 <code>chrome://extensions</code></li>
+  <li>右上角打开 <b>开发者模式</b></li>
+  <li>点 <b>加载已解压的扩展程序</b>，选择下面这个文件夹：</li>
+</ol>
+<span class="path">/Library/Application Support/THUAutoLogin/extension</span>
+<p>提示：在该文件选择窗口里按 <b>⌘⇧G</b>，把上面的路径粘进去回车即可。</p>
+<p>也可以直接在访达里打开该文件夹，把文件夹<b>拖到</b> chrome://extensions 页面上。</p>
+
+<h3>完成后</h3>
+<p>打开 <code>id.tsinghua.edu.cn</code> 登录页并保持 Chrome 在前台，扩展会自动完成登录。</p>
+
+<h3>需要卸载时</h3>
+<span class="path">sudo "/Library/Application Support/THUAutoLogin/uninstall.sh"</span>
+</body>
+</html>
