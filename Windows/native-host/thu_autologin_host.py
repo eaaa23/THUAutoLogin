@@ -446,12 +446,52 @@ def serve() -> int:
     return 0
 
 
-def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="THU Auto Login Windows native messaging host")
+def build_parser() -> argparse.ArgumentParser:
+    # allow_abbrev=False so no Chrome-supplied argument can ever be mistaken for
+    # an abbreviation of one of ours (e.g. "--p" matching --ping/--parent-window).
+    parser = argparse.ArgumentParser(
+        description="THU Auto Login Windows native messaging host",
+        allow_abbrev=False,
+    )
     parser.add_argument("--selftest", action="store_true", help="检查环境并向前台 Chrome 发送一次 Tab")
     parser.add_argument("--ping", action="store_true", help="打印诊断信息 (JSON)")
     parser.add_argument("--once", metavar="STRATEGY", help=f"发送一次按键，可选: {', '.join(sorted(STRATEGIES))}")
-    args = parser.parse_args(argv)
+
+    # Chrome appends its own arguments when it launches a native messaging host:
+    #   <origin>            e.g. chrome-extension://<id>/
+    #   --parent-window=0   Windows only: the HWND to parent any dialog to
+    # They are declared here purely so they can never trip argument parsing and
+    # kill the host before it has served a single request. Previously they hit
+    # argparse's "unrecognized arguments" path and the host exited 2, which
+    # Chrome reports only as "native host has exited".
+    parser.add_argument(
+        "origin", nargs="?", default=None,
+        help="Chrome passes the calling extension origin here (ignored)",
+    )
+    parser.add_argument(
+        "--parent-window", default=None,
+        help="Chrome passes the parent window handle here (ignored)",
+    )
+    return parser
+
+
+def parse_arguments(argv=None):
+    """Parse argv without ever rejecting an argument.
+
+    parse_known_args -- deliberately not parse_args -- is what keeps the host
+    alive: Chrome adds arguments of its own, and an unrecognised one must not be
+    fatal. Returns (args, extras).
+    """
+    return build_parser().parse_known_args(argv)
+
+
+def main(argv=None) -> int:
+    args, extras = parse_arguments(argv)
+
+    _log(
+        f"launched argv={sys.argv[1:]!r} origin={args.origin!r} "
+        f"parent_window={args.parent_window!r} extras={extras!r}"
+    )
 
     if args.selftest:
         return cli_selftest()

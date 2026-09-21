@@ -201,12 +201,51 @@ const UNLOCK_LADDER = [
 |---|---|---|
 | `Specified native messaging host not found` | 注册表项/清单路径不对，或 Chrome 未重启 | 重跑 `install.py`，然后重启 Chrome |
 | `Access to the specified native messaging host is forbidden` | 清单里 `allowed_origins` 的 ID 与实际扩展 ID 不一致 | 重跑 `install.py`（它会读 Chrome 配置重新检测） |
-| `Native host has exited` | 主机启动即崩 | 用 `--ping` 手动跑一遍看报错；多半是 pywin32 没装或启动器里的 Python 路径失效 |
+| `Native host has exited` | 主机启动即崩 | 见下方「Chrome 会附加自己的命令行参数」；再用 `--ping` 手动跑一遍看报错 |
+| 主机报 `unrecognized arguments: chrome-extension://… --parent-window=0` | 用 `argparse.parse_args()` 解析了 Chrome 附加的参数 | **已修复**（改用 `parse_known_args`）；若你本地改过，见下方说明 |
 | 返回 `chrome-not-foreground` | Chrome 不在前台 | 保持登录页在前台；或让扩展在切回标签页时重试（已内置） |
 | 返回 `chrome-not-running` | 没枚举到 Chrome 窗口 | 确认 Chrome 正在运行；若用的是其它 Chromium 浏览器，类名相同也能被识别 |
 | 按键发了但输入框仍为空 | Chrome 没有自动填充（没保存凭据），或按键不足以解锁 | 确认 Chrome 能弹出该站点的密码建议；调整解锁阶梯 |
 | 中文/空格路径导致启动失败 | `.cmd` 以 ANSI 代码页编码 | 安装器已优先用 `mbcs` 写入；若仍失败，改用 PyInstaller 打 exe |
 | 虚拟环境被删除后失效 | 启动器固定了 `sys.executable` | 用系统 Python 重装，或改用 exe |
+
+### Chrome 会附加自己的命令行参数
+
+Chrome 启动原生主机时**不是**只运行你的程序，它会追加两个参数：
+
+```
+thu-autologin-host.exe chrome-extension://<扩展ID>/ --parent-window=0
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^
+                       调用方扩展的 origin            Windows 专有：对话框父窗口句柄
+```
+
+所以主机**必须容忍不认识的参数**。用 `argparse.parse_args()` 会直接抛 `SystemExit(2)`：
+
+```
+usage: thu-autologin-host.exe [-h] [--selftest] [--ping] [--once STRATEGY]
+thu-autologin-host.exe: error: unrecognized arguments: chrome-extension://…/ --parent-window=0
+```
+
+而 Chrome 只会笼统地报 `Native host has exited`，看不到这段 stderr，非常难查。
+
+本主机用 `parse_known_args()` 而不是 `parse_args()`，并且把 `<origin>` 和 `--parent-window` **显式声明**出来（声明即文档，同时避免歧义），另外关掉了 `allow_abbrev`，防止 Chrome 的参数被当成我们自己选项的缩写。将来 Chrome 再加参数也只会被丢进 extras，不会让主机在开始服务前就退出。
+
+### 看不到主机报错怎么办
+
+Chrome 默认不显示原生主机的 stderr。用调试参数启动 Chrome 才能看到：
+
+```powershell
+& "C:\Program Files\Google\Chrome\Application\chrome.exe" --enable-logging=stderr --v=1
+```
+
+或者让主机自己记日志（更省事）：
+
+```powershell
+$env:THU_AUTOLOGIN_DEBUG=1
+Get-Content "$env:LOCALAPPDATA\THUAutoLogin\host.log" -Wait
+```
+
+主机启动时会把收到的完整命令行、origin、parent-window 都记进日志，排查参数问题很直接。
 
 完全没有任何反应时，最有效的顺序是：
 
