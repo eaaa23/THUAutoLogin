@@ -85,10 +85,15 @@ def run_gui() -> int:
                 messagebox.showerror("无法解压扩展", str(exc))
                 raise SystemExit(1)
 
-        def _copy(self, text, label):
+        def _copy(self, text, hint):
+            """Copy `text` and show a hint describing where to paste it.
+
+            The hint is supplied by the caller: a filesystem path and a
+            chrome:// URL are pasted in completely different places.
+            """
             self.clipboard_clear()
             self.clipboard_append(text)
-            self.status_var.set(f"已复制 {label}，请粘贴到浏览器地址栏")
+            self.status_var.set(hint)
 
         def _labelled(self, parent, text, wraplength=650, **kw):
             return ttk.Label(parent, text=text, wraplength=wraplength, justify="left", **kw)
@@ -136,11 +141,19 @@ def run_gui() -> int:
             ttk.Button(buttons, text="打开扩展文件夹",
                        command=lambda: os.startfile(self.ext_dir)).pack(side="left")
             ttk.Button(buttons, text="复制路径",
-                       command=lambda: self._copy(self.ext_dir, "扩展路径")).pack(side="left", padx=6)
+                       command=lambda: self._copy(
+                           self.ext_dir,
+                           "已复制扩展路径，可粘贴到“加载已解压的扩展程序”的文件选择窗口，"
+                           "或资源管理器的地址栏",
+                       )).pack(side="left", padx=6)
             ttk.Button(buttons, text=f"复制 {CHROME_URL}",
-                       command=lambda: self._copy(CHROME_URL, CHROME_URL)).pack(side="left")
+                       command=lambda: self._copy(
+                           CHROME_URL, f"已复制 {CHROME_URL}，请粘贴到浏览器地址栏"
+                       )).pack(side="left")
             ttk.Button(buttons, text=f"复制 {EDGE_URL}",
-                       command=lambda: self._copy(EDGE_URL, EDGE_URL)).pack(side="left", padx=6)
+                       command=lambda: self._copy(
+                           EDGE_URL, f"已复制 {EDGE_URL}，请粘贴到浏览器地址栏"
+                       )).pack(side="left", padx=6)
 
             self._labelled(
                 frame,
